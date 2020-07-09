@@ -1,6 +1,6 @@
 # Atlas
 
-Prepare maps for printing, using a tileserver based on Bing Maps’s Quadkey, and showing OS grid references.
+Prepare maps for printing, using a tileserver based on Bing Maps’s [Quadkey](https://docs.microsoft.com/en-us/bingmaps/articles/bing-maps-tile-system), and showing [OS grid references](https://en.wikipedia.org/wiki/Ordnance_Survey_National_Grid).
 
 Every tile fetched is permanently cached.
 
