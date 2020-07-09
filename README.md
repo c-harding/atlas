@@ -1,7 +1,8 @@
 # Atlas
 
-Prepare maps for printing, using a tileserver based on Bing Maps’s Quadkey, and
-showing OS grid references.
+Prepare maps for printing, using a tileserver based on Bing Maps’s Quadkey, and showing OS grid references.
+
+Every tile fetched is permanently cached.
 
 ## Usage
 
