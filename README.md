@@ -4,6 +4,8 @@ Prepare maps for printing, using a tileserver based on Bing Maps’s [Quadkey](h
 
 Every tile fetched is permanently cached.
 
+For best results, use Firefox.
+
 ## Usage
 
 ```
