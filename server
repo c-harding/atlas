@@ -1,0 +1,605 @@
+#!/usr/bin/env ruby
+
+require 'global_convert'
+require 'os_map_ref'
+require 'quadkey'
+require 'webrick'
+require 'fileutils'
+require 'down'
+
+terminal = $stdout.isatty && ARGV[0] != '-w'
+
+$margin = 0.5 # cm
+$side_axes = 0.75 # cm
+$tb_axes = 0.5 # cm
+$overlap = 2 # cm
+
+PageSetup = Struct.new(:paper, :scale) do
+  def width() paper[0] end
+  def height() paper[1] end
+  def paper_name() paper[2]end
+end
+
+$page_sizes = {
+  "A4" => [29.7, 21.0, 'A4 landscape'], # cm
+  "A4-portrait" => [21.0, 29.7, 'A4 portrait'], # cm
+}
+$page_sizes.default = $page_sizes['A4']
+
+$w = 5
+$h = 5
+
+$format = ENV["TILE_SERVER"] || "%s"
+$proxy_format = "/tile/%s"
+$port = ENV["ATLAS_PORT"] || 5000
+
+def move_one(q, negative = false, dimension = 1)
+  pre = q[0..-2]
+  return '' if q.empty?
+  tail = q[-1].to_i
+  new_pre = ((tail & dimension) == 0) ^ negative ? pre : move_one(pre, negative, dimension)
+  return new_pre + (tail ^ dimension).to_s
+end
+
+def move(q, dx, dy)
+  while dx > 0
+    q = move_one(q, false, 1)
+    dx -= 1
+  end
+
+  while dx < 0
+    q = move_one(q, true, 1)
+    dx += 1
+  end
+
+  while dy > 0
+    q = move_one(q, false, 2)
+    dy -= 1
+  end
+
+  while dy < 0
+    q = move_one(q, true, 2)
+    dy += 1
+  end
+
+  q
+end
+
+def coords_from_latlong_deg(lat, long)
+  latlong = GlobalConvert::Location.new(
+    input: {
+      projection: :wgs84,
+      lon: long * Math::PI / 180,
+      lat: lat * Math::PI / 180,
+    },
+    output: {
+      projection: :osgb36
+    }
+  )
+  return latlong.lon, latlong.lat
+end
+
+def latlong_deg_from_coords(easting, northing)
+  latlong = GlobalConvert::Location.new(
+    input: {
+      projection: :osgb36,
+      lon: easting,
+      lat: northing,
+    },
+    output: {
+      projection: :wgs84
+    }
+  )
+
+  return latlong.lat / Math::PI * 180, latlong.lon / Math::PI * 180
+end
+
+def proportion(q, location)
+  tl_latitude, tl_longitude = Quadkey.decode(q)
+  br_latitude, br_longitude = Quadkey.decode(move(q,1,1))
+
+  latitude, longitude = latlong_deg_from_coords(location.easting.to_i, location.northing.to_i)
+
+  return (longitude - tl_longitude) / (br_longitude - tl_longitude), (latitude - tl_latitude) / (br_latitude - tl_latitude)
+end
+
+def quad_to_coords(q)
+  latitude, longitude = Quadkey.decode(q)
+  easting, northing = coords_from_latlong_deg(latitude, longitude)
+  return easting, northing
+end
+
+def quadkey_for_location(location)
+  latitude, longitude = latlong_deg_from_coords(location.easting.to_i, location.northing.to_i)
+  return Quadkey.encode(latitude, longitude, 15)
+end
+
+def terminal_response(center)
+  centerQ = quadkey_for_location(OsMapRef::Location.for(center))
+  (-$h..$h).each do |y|
+    line = (-$w..$w).map do |x|
+      move(centerQ, x, y)
+    end
+    system("imgrow -u #{line.join(' ')}")
+  end
+end
+
+def ref_for_coords(easting, northing)
+  return OsMapRef::Location.for([
+    easting,
+    northing,
+  ].join(',')).map_reference
+end
+
+# in kilometers
+def offset_grid_ref(center, dx, dy)
+  ref = OsMapRef::Location.for(center)
+
+  ref_for_coords(
+    ref.easting.to_i+(1000*dx),
+    ref.northing.to_i+(1000*dy),
+  )
+end
+
+def neighbours(center,w,h)
+  up = offset_grid_ref(center, 0, h)
+  down = offset_grid_ref(center, 0, -h)
+  left = offset_grid_ref(center, -w, 0)
+  right = offset_grid_ref(center, w, 0)
+
+  return up, down, left, right
+end
+
+def pagination_size(page_setup, overlap = false)
+  offset = overlap ? $overlap : 0
+  return [
+    (page_setup.width - 2*($side_axes+$margin)-offset)/page_setup.scale,
+    (page_setup.height - 2*($tb_axes+$margin)-offset)/page_setup.scale,
+  ] # cm
+end
+
+def calculateCenters(points, page_setup)
+  easting_limits = points.map { |ref| OsMapRef::Location.for(ref).easting.to_i }.minmax
+  northing_limits = points.map { |ref| OsMapRef::Location.for(ref).northing.to_i }.minmax
+  mid = ref_for_coords(easting_limits.reduce(:+) / 2.0, northing_limits.reduce(:+) / 2.0)
+  easting_range = (easting_limits[1] - easting_limits[0])/1000.0 # km
+  northing_range = (northing_limits[1] - northing_limits[0])/1000.0 # km
+  page_width, page_height = pagination_size(page_setup, true)
+  xcount = [0, (easting_range / page_width).floor].max
+  ycount = [0, (northing_range / page_height).floor].max
+  min = offset_grid_ref(mid, - page_width * xcount / 2, - page_height * ycount / 2)
+
+  return (0..ycount).to_a.reverse.flat_map { |y|
+    (0..xcount).map { |x|
+      offset_grid_ref(min, x*page_width, y*page_height)
+    }
+  }.join(','), xcount + 1, ycount + 1
+end
+
+def webHead(page_setup)
+  <<HTML
+  <html>
+  <head>
+    <title>
+      Atlas: OS Maps for printing
+    </title>
+    <style>
+      body {
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      .container {
+        margin: #{$tb_axes}cm #{$side_axes}cm;
+        width: calc(100vw - #{2*($margin+$side_axes)}cm);
+        height: calc(100vh - #{2*($margin+$tb_axes)}cm);
+        position: relative;
+        page-break-inside: avoid;
+      }
+      .printing .container {
+        width: #{page_setup.width - 2*($side_axes+$margin)}cm;
+        height: #{page_setup.height - 2*($tb_axes+$margin)}cm;
+      }
+      @page {
+        margin: #{$margin}cm;
+        size: #{page_setup.paper_name};
+      }
+      .map {
+        overflow: hidden;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .map table {
+        border-collapse: collapse;
+      }
+      .map td { padding: 0; position: relative; }
+      .map img {
+        display: block;
+      }
+
+      .minimap {
+        position: absolute;
+        bottom: 100%;
+        left: 0;
+        border-collapse: collapse;
+      }
+
+      .minimap td {
+        padding: 0;
+        border: 0.2mm solid #999;
+        box-sizing: border-box;
+        background-color: white;
+        color-adjust: exact;
+      }
+
+      .minimap td.this {
+        background-color: #999;
+      }
+
+      .corner {
+        position: absolute;
+        width: #{$side_axes}cm;
+        height: #{$tb_axes}cm;
+      }
+      .corner.top-left { bottom: 100%; right: 100%; }
+      .corner.top-right { bottom: 100%; left: 100%; }
+      .corner.bottom-left { top: 100%; right: 100%; }
+      .corner.bottom-right { top: 100%; left: 100%; }
+
+      .border {
+        position: absolute;
+      }
+      .border.vertical {
+        width: 100%;
+        height: #{$tb_axes}cm;
+      }
+      .border.vertical.pre { bottom: 100%; }
+      .border.vertical.post { top: 100%; }
+
+      .border.horizontal {
+        height: 100%;
+        width: #{$side_axes}cm;
+      }
+      .border.horizontal.pre { right: 100%; }
+      .border.horizontal.post { left: 100%; }
+
+      .border .axis-label {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        color: DeepSkyBlue;
+        font-weight: bold;
+        width: 2cm;
+        height: 1cm;
+        margin: -0.5cm -1cm;
+        align-items: center;
+        display: flex;
+        justify-content: center;
+      }
+
+    </style>
+    <script>
+      const sleep = (t = 0) => new Promise(resolve => setTimeout(resolve, t));
+      const makeSingleSleeper = () => {
+        let timeout = 0;
+        return (t = 0) => new Promise(resolve => {
+          clearTimeout(timeout);
+          timeout = setTimeout(resolve, t);
+        });
+      }
+
+      const lineExtension = (xy1, xy2, x) => {
+        const [x1, y1] = xy1;
+        const [x2, y2] = xy2;
+        return (y2-y1)/(x2-x1) * (x - x1) + y1;
+      }
+
+      const proportion = (a, b, p) => {
+        return a * (1-p) + b * p;
+      }
+
+      const makeLabel = (number, style) => {
+        const label = document.createElement('div');
+        label.classList.add('axis-label');
+        label.innerText = (""+number).slice(-2);
+        Object.assign(label.style, style);
+        return label;
+      };
+
+      const addAxisTick = (element, labelText, offsetProperty, offsetValue) => {
+        element.appendChild(
+          makeLabel(labelText, {
+            [offsetProperty]: offsetValue + 'px',
+          }),
+        );
+      };
+
+      const addDimensionTicks = (elements, baseLine, nextLine, offsetProperty, coordinateLabel, axisSize, container, getIntersect) => {
+        for (const element of elements) {
+          element.innerHTML = '';
+          const bounds = element.getBoundingClientRect();
+
+          const baseCoordinate = Math.floor(container.dataset[coordinateLabel]/1000.0);
+          const baseTickIntersect = getIntersect(bounds, baseLine);
+          const nextTickIntersect = getIntersect(bounds, nextLine);
+          const axisLength = bounds[axisSize];
+          const tickSep = nextTickIntersect - baseTickIntersect;
+
+          for (let intersect = baseTickIntersect, coordinate = baseCoordinate;
+               0 <= intersect && intersect <= axisLength;
+               intersect -= tickSep, coordinate --) {
+            addAxisTick(element, coordinate, offsetProperty, intersect);
+          }
+          for (let intersect = nextTickIntersect, coordinate = baseCoordinate + 1;
+               0 <= intersect && intersect <= axisLength;
+               intersect += tickSep, coordinate ++) {
+            addAxisTick(element, coordinate, offsetProperty, intersect);
+          }
+        }
+      };
+
+      const addAllTicks = () => {
+        for (const container of document.querySelectorAll('.container')) {
+          const tileBounds = container.querySelector('.center').getBoundingClientRect();
+          const corners = container.dataset;
+          const cornerXY = (corner) => [
+            proportion(tileBounds.left, tileBounds.right, JSON.parse(corner)[0]),
+            proportion(tileBounds.top, tileBounds.bottom, JSON.parse(corner)[1]),
+          ];
+
+          addDimensionTicks(
+            container.querySelectorAll('.border.horizontal'),
+            [cornerXY(corners.bottomLeft), cornerXY(corners.bottomRight)],
+            [cornerXY(corners.topLeft), cornerXY(corners.topRight)],
+            'top', 'northing', 'height', container,
+            (bounds, [corner1, corner2]) => lineExtension(
+              corner1,
+              corner2,
+              (bounds.left + bounds.right) / 2,
+            ) - bounds.y,
+          );
+
+          addDimensionTicks(
+            container.querySelectorAll('.border.vertical'),
+            [cornerXY(corners.bottomLeft), cornerXY(corners.topLeft)],
+            [cornerXY(corners.bottomRight), cornerXY(corners.topRight)],
+            'left', 'easting', 'width', container,
+            (bounds, [corner1, corner2]) => lineExtension(
+              corner1.slice().reverse(),
+              corner2.slice().reverse(),
+              (bounds.top + bounds.bottom) / 2,
+            ) - bounds.x,
+          );
+        }
+      };
+
+      const resizeSleep = makeSingleSleeper();
+      window.addEventListener("resize", async () => {
+        await resizeSleep(10);
+        addAllTicks();
+      });
+
+      window.addEventListener("afterprint", () => {
+        // document.body.classList.remove('printing');
+        addAllTicks();
+      });
+      window.addEventListener("beforeprint", () => {
+        // document.body.classList.add('printing');
+        addAllTicks();
+      });
+      window.addEventListener("DOMContentLoaded", () => {
+        addAllTicks();
+      });
+
+      const addMap = async (direction) => {
+        const res = await fetch(`/?center=${direction}&partial`);
+        const html = await res.text();
+        document.body.insertAdjacentHTML('beforeend',html);
+        addAllTicks();
+      };
+    </script>
+  </head>
+HTML
+end
+
+def scale_factor_at(center)
+  location = OsMapRef::Location.for(center)
+  centerQ = quadkey_for_location(location)
+
+  square_left_lat, square_left_long = latlong_deg_from_coords(location.easting.to_i.floor(-3), location.northing.to_i)
+  square_right_lat, square_right_long = latlong_deg_from_coords(location.easting.to_i.floor(-3)+1000, location.northing.to_i)
+  _, tile_left_long = Quadkey.decode(centerQ)
+  _, tile_right_long = Quadkey.decode(move(centerQ,1,0))
+
+  true_square_length = ((square_right_long - square_left_long)**2 + (square_right_lat - square_left_lat)**2)**0.5
+
+  return (tile_right_long - tile_left_long) / true_square_length
+end
+
+def corner_label(center, dx, dy, page_setup)
+  full_width, full_height = pagination_size(page_setup, false)
+  offset_grid_ref(center, dx * full_width / 2, dy * full_height / 2)
+end
+
+def webResponseSingle(center, page_setup, minimap="")
+  location = OsMapRef::Location.for(center)
+  centerQ = quadkey_for_location(location)
+
+  scale_factor = scale_factor_at(center)
+
+  cell_pos_x, cell_pos_y = proportion(centerQ, location)
+  
+  res = StringIO.new
+
+  up, down, left, right = neighbours(
+    center,
+    *pagination_size(page_setup, true),
+  )
+
+  res << <<END
+    <div
+      class="container"
+      data-center="#{location.map_reference}"
+      data-easting="#{location.easting.to_i}"
+      data-northing="#{location.northing.to_i}"
+      data-top-left="#{proportion(centerQ, OsMapRef::Location.for([
+        location.easting.to_i.floor(-3),
+        location.northing.to_i.floor(-3)+1000,
+      ].join(',')))}"
+      data-top-right="#{proportion(centerQ, OsMapRef::Location.for([
+        location.easting.to_i.floor(-3)+1000,
+        location.northing.to_i.floor(-3)+1000,
+      ].join(',')))}"
+      data-bottom-left="#{proportion(centerQ, OsMapRef::Location.for([
+        location.easting.to_i.floor(-3),
+        location.northing.to_i.floor(-3),
+      ].join(',')))}"
+      data-bottom-right="#{proportion(centerQ, OsMapRef::Location.for([
+        location.easting.to_i.floor(-3)+1000,
+        location.northing.to_i.floor(-3),
+      ].join(',')))}"
+      data-north="#{up}"
+      data-south="#{down}"
+      data-west="#{left}"
+      data-east="#{right}"
+    >
+      <style>
+        .container[data-center='#{location.map_reference}'] table img {
+          width: #{page_setup.scale*scale_factor}cm;
+          height: #{page_setup.scale*scale_factor}cm;
+        }
+      </style>
+      <div class="corner top-left">#{corner_label(center, -1, 1, page_setup)[0..2]}</div>
+      <div class="corner bottom-left">#{corner_label(center, -1, -1, page_setup)[0..2]}</div>
+      <div class="corner top-right">#{corner_label(center, 1, 1, page_setup)[0..2]}</div>
+      <div class="corner bottom-right">#{corner_label(center, 1, -1, page_setup)[0..2]}</div>
+      <div class="border vertical pre"></div>
+      <div class="border vertical post"></div>
+      <div class="border horizontal pre"></div>
+      <div class="border horizontal post"></div>
+      #{minimap}
+      <div class='map'>
+        <table
+          style="margin-top: #{-page_setup.scale*cell_pos_y}cm;
+                 margin-bottom: #{-page_setup.scale*(1-cell_pos_y)}cm;
+                 margin-left: #{-page_setup.scale*cell_pos_x}cm;
+                 margin-right: #{-page_setup.scale*(1-cell_pos_x)}cm;"
+        >
+END
+
+  w = (page_setup.width/2 / (page_setup.scale*scale_factor)).ceil.to_i
+  h = (page_setup.height/2 / (page_setup.scale*scale_factor)).ceil.to_i
+  (-h..h).each do |y|
+    res << "<tr>"
+    line = (-w..w).map do |x|
+      move(centerQ, x, y)
+    end
+    line.each_with_index do |cell,i|
+      center = y == 0 && i == w
+      res << "<td "
+      res << "class='center'" if center
+      res << ">"
+      res << "<img src=\"#{sprintf($proxy_format, cell)}\">"
+      res << "</td>"
+    end
+    res << "</tr>"
+  end
+  res << <<END
+        </table>
+      </div>
+    </div>
+END
+  res.string
+end
+
+def minimap(xcount, ycount)
+  return '' if xcount != 0 && ycount != 0
+  minimap = StringIO.new
+  minimap << '<table class="minimap"'
+  minimap << "  style='height: #{$tb_axes}cm; width: #{$tb_axes.to_f * xcount / ycount}cm'"
+  minimap << '>'
+  (0...ycount).each do |y|
+    minimap << '<tr>'
+    (0...xcount).each do |x|
+      minimap << '<td '
+      minimap << 'class="this"' if y*xcount + x == i
+      minimap << '>'
+      minimap << '</td>'
+    end
+    minimap << '</tr>'
+  end
+  minimap << '</table>'
+  minimap.string
+end
+
+def webResponse(centers, partial, page_setup, xcount = 0, ycount = 0)
+  res = StringIO.new
+  
+  unless partial
+    res << "<html>"
+    res << webHead(page_setup) unless partial
+    res << '<body class="printing">'
+  end
+  centers.each_with_index do |center, i|
+    res << webResponseSingle(center, page_setup, minimap(xcount, ycount))
+  end
+  res << '</body></html>' unless partial
+  res.string
+end
+
+if terminal
+  terminal_response(ARGV.join(""))  
+else
+  dev_stdout = WEBrick::Log.new(STDOUT, WEBrick::BasicLog::ERROR)
+  server = WEBrick::HTTPServer.new(Port: $port, Logger: dev_stdout, AccessLog: [])
+  trap 'TERM' do server.shutdown end
+  trap 'INT' do server.shutdown end
+  
+  server.mount_proc '/' do |req, res|
+    case req.path
+    when %r"^/tile/(\d+)$"
+      quadkey = $~[1]
+      folder = File.join(File.dirname(__FILE__), 'tilecache')
+
+      FileUtils.mkdir_p(folder)
+      cache_path = File.join(folder, quadkey+'.jpg')
+      unless File.exist?(cache_path)
+        puts "Fetching #{quadkey}"
+        tempfile = Down.download(sprintf($format, quadkey))
+        FileUtils.mv(tempfile.path, cache_path)
+      end
+      res.header["Content-Type"] = "image/jpeg"
+      res.header["Cache-Control"] ="public"
+      res.header["Expires"] ="never"
+      res.body = File.new(cache_path, "r")
+    when '/'
+      centers = req.query['center']
+      partial = req.query['partial']
+      paper = $page_sizes[req.query['paper']]
+      scale = req.query['scale'] ? req.query['scale'].to_i : 4
+
+      page_setup = PageSetup.new(paper, scale)
+
+      xcount = 0
+      ycount = 0
+      if req.query['fit']
+        centers, xcount, ycount = calculateCenters(req.query['fit'].split(','), page_setup)
+      end
+      if centers
+        res.header['Content-Type'] = "text/html; charset=utf-8"
+        res.body = webResponse(centers.split(','), !!partial, page_setup, xcount, ycount)
+      else
+        res.status = 400
+        res.body = "No center given"
+      end
+    else
+      res.status = 400
+      res.body = "Bad URL"
+    end
+  end
+
+  server.start
+end
