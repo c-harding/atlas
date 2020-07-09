@@ -35,3 +35,7 @@ The center argument is an OS grid reference, or comma-separated list thereof (on
 | `center` |  | A comma-separated list of pages to print, given as OS grid references of their center point. This is required unless `fit` is given instead. |
 | `fit` |  | A comma-separated list of points to print. A bounding rectangle will be calculated, and every page in this rectangle will be printed. |
 | `partial` |  | If present, do not serve the `<head>`, only the new container. This allows AJAX requests for more maps, via the `addMap()` function. |
+
+## Sample
+
+![](sample.jpg)

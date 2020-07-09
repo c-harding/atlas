@@ -125,17 +125,20 @@ def terminal_response(center)
   end
 end
 
-def ref_for_coords(easting, northing)
+def loc_for_coords(easting, northing)
   return OsMapRef::Location.for([
-    easting,
-    northing,
-  ].join(',')).map_reference
+    "%06d" % easting,
+    "%06d" % northing,
+  ].join(','))
+end
+
+def ref_for_coords(easting, northing)
+  loc_for_coords(easting, northing).map_reference
 end
 
 # in kilometers
 def offset_grid_ref(center, dx, dy)
   ref = OsMapRef::Location.for(center)
-
   ref_for_coords(
     ref.easting.to_i+(1000*dx),
     ref.northing.to_i+(1000*dy),
@@ -446,22 +449,22 @@ def webResponseSingle(center, page_setup, minimap="")
       data-center="#{location.map_reference}"
       data-easting="#{location.easting.to_i}"
       data-northing="#{location.northing.to_i}"
-      data-top-left="#{proportion(centerQ, OsMapRef::Location.for([
+      data-top-left="#{proportion(centerQ, loc_for_coords(
         location.easting.to_i.floor(-3),
         location.northing.to_i.floor(-3)+1000,
-      ].join(',')))}"
-      data-top-right="#{proportion(centerQ, OsMapRef::Location.for([
+      ))}"
+      data-top-right="#{proportion(centerQ, loc_for_coords(
         location.easting.to_i.floor(-3)+1000,
         location.northing.to_i.floor(-3)+1000,
-      ].join(',')))}"
-      data-bottom-left="#{proportion(centerQ, OsMapRef::Location.for([
+      ))}"
+      data-bottom-left="#{proportion(centerQ, loc_for_coords(
         location.easting.to_i.floor(-3),
         location.northing.to_i.floor(-3),
-      ].join(',')))}"
-      data-bottom-right="#{proportion(centerQ, OsMapRef::Location.for([
+      ))}"
+      data-bottom-right="#{proportion(centerQ, loc_for_coords(
         location.easting.to_i.floor(-3)+1000,
         location.northing.to_i.floor(-3),
-      ].join(',')))}"
+      ))}"
       data-north="#{up}"
       data-south="#{down}"
       data-west="#{left}"
