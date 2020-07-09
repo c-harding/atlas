@@ -162,12 +162,12 @@ def pagination_size(page_setup, overlap = false)
   ] # cm
 end
 
-def calculateCenters(points, page_setup)
+def calculateCenters(points, padding, page_setup)
   easting_limits = points.map { |ref| OsMapRef::Location.for(ref).easting.to_i }.minmax
   northing_limits = points.map { |ref| OsMapRef::Location.for(ref).northing.to_i }.minmax
   mid = ref_for_coords(easting_limits.reduce(:+) / 2.0, northing_limits.reduce(:+) / 2.0)
-  easting_range = (easting_limits[1] - easting_limits[0])/1000.0 # km
-  northing_range = (northing_limits[1] - northing_limits[0])/1000.0 # km
+  easting_range = (easting_limits[1] - easting_limits[0])/1000.0 + padding # km
+  northing_range = (northing_limits[1] - northing_limits[0])/1000.0 + padding # km
   page_width, page_height = pagination_size(page_setup, true)
   xcount = [0, (easting_range / page_width).floor].max
   ycount = [0, (northing_range / page_height).floor].max
@@ -519,8 +519,8 @@ END
   res.string
 end
 
-def minimap(xcount, ycount)
-  return '' if xcount != 0 && ycount != 0
+def minimap(i, xcount, ycount)
+  return '' unless xcount * ycount > 1
   minimap = StringIO.new
   minimap << '<table class="minimap"'
   minimap << "  style='height: #{$tb_axes}cm; width: #{$tb_axes.to_f * xcount / ycount}cm'"
@@ -548,7 +548,7 @@ def webResponse(centers, partial, page_setup, xcount = 0, ycount = 0)
     res << '<body class="printing">'
   end
   centers.each_with_index do |center, i|
-    res << webResponseSingle(center, page_setup, minimap(xcount, ycount))
+    res << webResponseSingle(center, page_setup, minimap(i, xcount, ycount))
   end
   res << '</body></html>' unless partial
   res.string
@@ -584,13 +584,14 @@ else
       partial = req.query['partial']
       paper = $page_sizes[req.query['paper']]
       scale = req.query['scale'] ? req.query['scale'].to_i : 4
+      padding = req.query['padding'] ? req.query['padding'].to_f : 0
 
       page_setup = PageSetup.new(paper, scale)
 
       xcount = 0
       ycount = 0
       if req.query['fit']
-        centers, xcount, ycount = calculateCenters(req.query['fit'].split(','), page_setup)
+        centers, xcount, ycount = calculateCenters(req.query['fit'].split(','), padding, page_setup)
       end
       if centers
         res.header['Content-Type'] = "text/html; charset=utf-8"
