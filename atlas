@@ -7,7 +7,7 @@ require 'webrick'
 require 'fileutils'
 require 'down'
 
-terminal = $stdout.isatty && ARGV[0] != '-w'
+terminal = $stdout.isatty && ARGV[1]
 
 $margin = 0.5 # cm
 $side_axes = 0.75 # cm
@@ -26,8 +26,8 @@ $page_sizes = {
 }
 $page_sizes.default = $page_sizes['A4']
 
-$w = 5
-$h = 5
+$w = 2
+$h = 2
 
 $format = ENV["TILE_SERVER"] || "%s"
 $proxy_format = "/tile/%s"
@@ -115,12 +115,13 @@ def quadkey_for_location(location)
 end
 
 def terminal_response(center)
+  Dir.chdir(File.dirname(__FILE__))
   centerQ = quadkey_for_location(OsMapRef::Location.for(center))
   (-$h..$h).each do |y|
     line = (-$w..$w).map do |x|
       move(centerQ, x, y)
     end
-    system("imgrow -u #{line.join(' ')}")
+    system("./imgrow -u #{line.join(' ')}")
   end
 end
 
