@@ -17,12 +17,16 @@ $overlap = 2 # cm
 PageSetup = Struct.new(:paper, :scale) do
   def width() paper[0] end
   def height() paper[1] end
-  def paper_name() paper[2]end
+  def paper_name() paper[2] end
 end
 
 $page_sizes = {
+  "A5" => [21.0, 14.8, 'A5 landscape'], # cm
+  "A5-portrait" => [14.8, 21.0, 'A5 portrait'], # cm
   "A4" => [29.7, 21.0, 'A4 landscape'], # cm
   "A4-portrait" => [21.0, 29.7, 'A4 portrait'], # cm
+  "A3" => [42.0, 29.7, 'A3 landscape'], # cm
+  "A3-portrait" => [29.7, 42.0, 'A3 portrait'], # cm
 }
 $page_sizes.default = $page_sizes['A4']
 
@@ -191,7 +195,9 @@ def webHead(page_setup)
       body {
         margin: 0;
         display: flex;
-        flex-direction: column;
+        flex-direction: row;
+        flex-wrap: wrap;
+        width: 100%;
       }
       .container {
         margin: #{$tb_axes}cm #{$side_axes}cm;
