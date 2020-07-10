@@ -34,6 +34,7 @@ The center argument is an OS grid reference, or comma-separated list thereof (on
 |-|-|-|
 | `scale` | 1 | Number of centimetres printed for each kilometre on the map. |
 | `paper` | A4 | `A3`, `A4` or `A5`, or `A3-portrait` etc. This may have to be specified when printing too. |
+| `margin` | 0.5 | How many centimeters of border to leave around the page. |
 | `center` |  | A comma-separated list of pages to print, given as OS grid references of their center point. This is required unless `fit` is given instead. |
 | `fit` |  | A comma-separated list of points to print. A bounding rectangle will be calculated, and every page in this rectangle will be printed. |
 | `padding` | 0 | Include a minimum of `padding` kilometres around each of the provided points in `fit`. This has no effect if `fit` is not given. |

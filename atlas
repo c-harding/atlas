@@ -9,14 +9,28 @@ require 'down'
 
 terminal = $stdout.isatty && ARGV[1]
 
-$margin = 0.5 # cm
-$side_axes = 0.75 # cm
-$tb_axes = 0.5 # cm
-$overlap = 2 # cm
+PageSetup = Struct.new(:paper, :scale, :page_margin) do
+  def initialize(*) super
+    @northing_axis = 0.75 # cm
+    @easting_axis = 0.5 # cm
+    @overlap = 2.0 # cm
+  end
+  attr_reader :northing_axis, :easting_axis
 
-PageSetup = Struct.new(:paper, :scale) do
+  def map_margin_x() page_margin + northing_axis end
+  def map_margin_y() page_margin + easting_axis end
   def width() paper[0] end
   def height() paper[1] end
+  def map_width(safe=false)
+    bare_map_width = width - 2 * map_margin_x
+    safe ? bare_map_width - @overlap : bare_map_width
+  end
+  def map_height(safe=false)
+    bare_map_height = height - 2 * map_margin_y
+    safe ? bare_map_height - @overlap : bare_map_height
+  end
+  def scaled_map_width(safe=false) map_width(safe) / scale end
+  def scaled_map_height(safe=false) map_height(safe) / scale end
   def paper_name() paper[2] end
 end
 
@@ -158,23 +172,14 @@ def neighbours(center,w,h)
   return up, down, left, right
 end
 
-def pagination_size(page_setup, overlap = false)
-  offset = overlap ? $overlap : 0
-  return [
-    (page_setup.width - 2*($side_axes+$margin)-offset)/page_setup.scale,
-    (page_setup.height - 2*($tb_axes+$margin)-offset)/page_setup.scale,
-  ] # cm
-end
-
 def calculateCenters(points, padding, page_setup)
   easting_limits = points.map { |ref| OsMapRef::Location.for(ref).easting.to_i }.minmax
   northing_limits = points.map { |ref| OsMapRef::Location.for(ref).northing.to_i }.minmax
   mid = ref_for_coords(easting_limits.reduce(:+) / 2.0, northing_limits.reduce(:+) / 2.0)
   easting_range = (easting_limits[1] - easting_limits[0])/1000.0 + padding # km
   northing_range = (northing_limits[1] - northing_limits[0])/1000.0 + padding # km
-  page_width, page_height = pagination_size(page_setup, true)
-  xcount = [0, (easting_range / page_width).floor].max
-  ycount = [0, (northing_range / page_height).floor].max
+  xcount = [0, (easting_range / page_setup.scaled_map_width(true)).floor].max
+  ycount = [0, (northing_range / page_setup.scaled_map_height(true)).floor].max
   min = offset_grid_ref(mid, - page_width * xcount / 2, - page_height * ycount / 2)
 
   return (0..ycount).to_a.reverse.flat_map { |y|
@@ -200,18 +205,18 @@ def webHead(page_setup)
         width: 100%;
       }
       .container {
-        margin: #{$tb_axes}cm #{$side_axes}cm;
-        width: calc(100vw - #{2*($margin+$side_axes)}cm);
-        height: calc(100vh - #{2*($margin+$tb_axes)}cm);
+        margin: #{page_setup.easting_axis}cm #{page_setup.northing_axis}cm;
+        width: calc(100vw - #{2 * page_setup.map_margin_x}cm);
+        height: calc(100vh - #{2 * page_setup.map_margin_y}cm);
         position: relative;
         page-break-inside: avoid;
       }
       .printing .container {
-        width: #{page_setup.width - 2*($side_axes+$margin)}cm;
-        height: #{page_setup.height - 2*($tb_axes+$margin)}cm;
+        width: #{page_setup.map_width}cm;
+        height: #{page_setup.map_height}cm;
       }
       @page {
-        margin: #{$margin}cm;
+        margin: #{page_setup.page_margin}cm;
         size: #{page_setup.paper_name};
       }
       .map {
@@ -251,8 +256,8 @@ def webHead(page_setup)
 
       .corner {
         position: absolute;
-        width: #{$side_axes}cm;
-        height: #{$tb_axes}cm;
+        width: #{page_setup.northing_axis}cm;
+        height: #{page_setup.easting_axis}cm;
       }
       .corner.top-left { bottom: 100%; right: 100%; }
       .corner.top-right { bottom: 100%; left: 100%; }
@@ -264,14 +269,14 @@ def webHead(page_setup)
       }
       .border.vertical {
         width: 100%;
-        height: #{$tb_axes}cm;
+        height: #{page_setup.easting_axis}cm;
       }
       .border.vertical.pre { bottom: 100%; }
       .border.vertical.post { top: 100%; }
 
       .border.horizontal {
         height: 100%;
-        width: #{$side_axes}cm;
+        width: #{page_setup.northing_axis}cm;
       }
       .border.horizontal.pre { right: 100%; }
       .border.horizontal.post { left: 100%; }
@@ -430,8 +435,11 @@ def scale_factor_at(center)
 end
 
 def corner_label(center, dx, dy, page_setup)
-  full_width, full_height = pagination_size(page_setup, false)
-  offset_grid_ref(center, dx * full_width / 2, dy * full_height / 2)
+  offset_grid_ref(
+    center,
+    dx * page_setup.scaled_map_width(true) / 2,
+    dy * page_setup.scaled_map_height(true) / 2,
+  )
 end
 
 def webResponseSingle(center, page_setup, minimap="")
@@ -446,7 +454,8 @@ def webResponseSingle(center, page_setup, minimap="")
 
   up, down, left, right = neighbours(
     center,
-    *pagination_size(page_setup, true),
+    page_setup.scaled_map_width(true),
+    page_setup.scaled_map_height(true),
   )
 
   res << <<END
@@ -525,11 +534,13 @@ END
   res.string
 end
 
-def minimap(i, xcount, ycount)
+def minimap(page_setup, i, xcount, ycount)
   return '' unless xcount * ycount > 1
   minimap = StringIO.new
   minimap << '<table class="minimap"'
-  minimap << "  style='height: #{$tb_axes}cm; width: #{$tb_axes.to_f * xcount / ycount}cm'"
+  
+  height = page_setup.easting_axis
+  minimap << "  style='height: #{height}cm; width: #{height.to_f * xcount / ycount}cm'"
   minimap << '>'
   (0...ycount).each do |y|
     minimap << '<tr>'
@@ -554,7 +565,7 @@ def webResponse(centers, partial, page_setup, xcount = 0, ycount = 0)
     res << '<body class="printing">'
   end
   centers.each_with_index do |center, i|
-    res << webResponseSingle(center, page_setup, minimap(i, xcount, ycount))
+    res << webResponseSingle(center, page_setup, minimap(page_setup, i, xcount, ycount))
   end
   res << '</body></html>' unless partial
   res.string
@@ -589,10 +600,11 @@ else
       centers = req.query['center']
       partial = req.query['partial']
       paper = $page_sizes[req.query['paper']]
+      margin = req.query['margin'] ? req.query['margin'].to_f : 0.5
       scale = req.query['scale'] ? req.query['scale'].to_i : 4
       padding = req.query['padding'] ? req.query['padding'].to_f : 0
 
-      page_setup = PageSetup.new(paper, scale)
+      page_setup = PageSetup.new(paper, scale, margin)
 
       xcount = 0
       ycount = 0
