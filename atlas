@@ -9,6 +9,23 @@ require 'fileutils'
 require 'concurrent'
 require 'down'
 
+$page_sizes = {
+  "A5" => [21.0, 14.8, 'A5 landscape'], # cm
+  "A5-portrait" => [14.8, 21.0, 'A5 portrait'], # cm
+  "A4" => [29.7, 21.0, 'A4 landscape'], # cm
+  "A4-portrait" => [21.0, 29.7, 'A4 portrait'], # cm
+  "A3" => [42.0, 29.7, 'A3 landscape'], # cm
+  "A3-portrait" => [29.7, 42.0, 'A3 portrait'], # cm
+}
+$page_sizes.default = $page_sizes['A4']
+
+$w = 2
+$h = 2
+
+$port = ENV["ATLAS_PORT"] || 5000
+$config_file = ENV["ATLAS_RC"] || 'atlasrc.yaml'
+$address = ENV["ATLAS_ADDRESS"] || '127.0.0.1'
+
 PageSetup = Struct.new(:paper, :scale, :page_margin) do
   def initialize(*) super
     @northing_axis = 0.75 # cm
@@ -371,22 +388,6 @@ def create_tile_servers(default, *others)
   hash.default = default
   hash
 end
-
-$page_sizes = {
-  "A5" => [21.0, 14.8, 'A5 landscape'], # cm
-  "A5-portrait" => [14.8, 21.0, 'A5 portrait'], # cm
-  "A4" => [29.7, 21.0, 'A4 landscape'], # cm
-  "A4-portrait" => [21.0, 29.7, 'A4 portrait'], # cm
-  "A3" => [42.0, 29.7, 'A3 landscape'], # cm
-  "A3-portrait" => [29.7, 42.0, 'A3 portrait'], # cm
-}
-$page_sizes.default = $page_sizes['A4']
-
-$w = 2
-$h = 2
-
-$port = ENV["ATLAS_PORT"] || 5000
-$config_file = ENV["ATLAS_RC"] || 'atlasrc.yaml'
 
 def terminal_response(center, tile_server)
   Dir.chdir(File.dirname(__FILE__))
@@ -760,7 +761,7 @@ if $stdout.isatty && ARGV[0]
   terminal_response(ARGV.join(" "), tile_servers.default)
 else
   dev_stdout = WEBrick::Log.new(STDOUT, WEBrick::BasicLog::ERROR)
-  server = WEBrick::HTTPServer.new(Port: $port, Logger: dev_stdout, AccessLog: [])
+  server = WEBrick::HTTPServer.new(BindAddress: $address, Port: $port, Logger: dev_stdout, AccessLog: [])
   trap 'TERM' do server.shutdown end
   trap 'INT' do server.shutdown end
 
