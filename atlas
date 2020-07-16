@@ -4,10 +4,10 @@ require 'global_convert'
 require 'os_map_ref'
 require 'quadkey'
 require 'webrick'
+require 'open-uri'
 require 'fileutils'
+require 'concurrent'
 require 'down'
-
-terminal = $stdout.isatty && ARGV[1]
 
 PageSetup = Struct.new(:paper, :scale, :page_margin) do
   def initialize(*) super
@@ -34,6 +34,344 @@ PageSetup = Struct.new(:paper, :scale, :page_margin) do
   def paper_name() paper[2] end
 end
 
+class TileServer
+  def initialize(namespace, folder, grid_lines, os_north)
+    @namespace = namespace
+    @folder = folder
+    @grid_lines = grid_lines
+    @os_north = os_north
+  end
+
+  attr_reader :namespace, :folder, :grid_lines, :os_north
+
+  def proxy_to_tile(tile) "/tile/#{namespace}/#{tile}" end
+
+  def from_os(easting, northing)
+    latitude, longitude = latlong_deg_from_coords(easting, northing)
+    from_ll(latitude, longitude)
+  end
+
+  def to_os(tile)
+    latitude, longitude = to_ll(tile)
+    coords_from_latlong_deg(latitude, longitude)
+  end
+
+  def coords_from_latlong_deg(lat, long)
+    latlong = GlobalConvert::Location.new(
+      input: {
+        projection: :wgs84,
+        lon: long * Math::PI / 180,
+        lat: lat * Math::PI / 180,
+      },
+      output: {
+        projection: :osgb36
+      }
+    )
+    return latlong.lon, latlong.lat
+  end
+
+  def latlong_deg_from_coords(easting, northing)
+    latlong = GlobalConvert::Location.new(
+      input: {
+        projection: :osgb36,
+        lon: easting,
+        lat: northing,
+      },
+      output: {
+        projection: :wgs84
+      }
+    )
+
+    return latlong.lat / Math::PI * 180, latlong.lon / Math::PI * 180
+  end
+
+  # number of kilometers per tile horizontally
+  def scale_factor_at(center)
+    easting, northing = coords_for_ref(center)
+    tile = from_os(easting, northing)
+    
+    square_left = latlong_deg_from_coords(easting.floor(-3), northing)
+    square_right = latlong_deg_from_coords(easting.floor(-3) + 1000, northing)
+    tile_left = to_ll(tile)
+    tile_right = to_ll(move(tile, 1, 0))
+
+    pythagoras(distance(tile_left, tile_right)[0..1]) / pythagoras(distance(square_left, square_right))
+  end
+
+  def proportion(tile, (easting, northing))
+    tl_latitude, tl_longitude = to_ll(tile)
+    br_latitude, br_longitude = to_ll(move(tile, 1, 1))
+
+    latitude, longitude = latlong_deg_from_coords(easting, northing)
+
+    return (longitude - tl_longitude) / (br_longitude - tl_longitude), (latitude - tl_latitude) / (br_latitude - tl_latitude)
+  end
+
+
+  def distance(p1, p2) p1.zip(p2).map { |(a, b)| a - b } end
+
+  def pythagoras(as) as.map { |a| a ** 2 }.reduce(:+) ** 0.5 end
+
+  def closest_zoom(zoom)
+    if zoom.nil?
+      @zoom
+    elsif @zooms.include? zoom
+      zoom
+    elsif @zooms.min > 15
+      @zooms.min
+    else
+      @zooms.max
+    end
+  end
+
+  def with_zoom(zoom = nil)
+    zoom = zoom.to_i unless zoom.nil?
+    new_zoom = closest_zoom(zoom)
+    if new_zoom == @zoom
+      self
+    else
+      new_with_zoom(new_zoom)
+    end
+  end
+end
+
+class QuadkeyTileServer < TileServer
+  def initialize(url:, namespace:, folder:, zoom: 15, zooms: nil, grid_lines:, os_north:)
+    super(namespace, folder, grid_lines, os_north)
+    @url = url
+    @format = "image/jpeg"
+    @extension = "jpg"
+    @zoom = zoom
+    @zooms = zooms || [zoom]
+  end
+
+  attr_reader :format
+
+  def new_with_zoom(zoom)
+    QuadkeyTileServer.new(url: @url, namespace: namespace, folder: @folder, zoom: new_zoom, zooms: @zooms, grid_lines: grid_lines, os_north: os_north)
+  end
+
+  def path_to_tile(quadkey) "#{quadkey}.#{@extension}" end
+  def url_to_tile(quadkey) sprintf(@url, quadkey) end
+
+  def move_one(q, negative = false, dimension = 1)
+    pre = q[0..-2]
+    return '' if q.empty?
+    tail = q[-1].to_i
+    new_pre = ((tail & dimension) == 0) ^ negative ? pre : move_one(pre, negative, dimension)
+    return new_pre + (tail ^ dimension).to_s
+  end
+
+  def move(q, dx, dy)
+    while dx > 0
+      q = move_one(q, false, 1)
+      dx -= 1
+    end
+
+    while dx < 0
+      q = move_one(q, true, 1)
+      dx += 1
+    end
+
+    while dy > 0
+      q = move_one(q, false, 2)
+      dy -= 1
+    end
+
+    while dy < 0
+      q = move_one(q, true, 2)
+      dy += 1
+    end
+
+    q
+  end
+
+  def from_ll(lat, long) Quadkey.encode(lat, long, @zoom) end
+  def to_ll(q) Quadkey.decode(q) end
+end
+
+# class Buffer
+#   def initialize(size=4, time=0.1)
+#     @flag = Mutex.new
+#     @buffer = []
+#     @sleeper = nil
+#     @size = size
+#     @time = time
+#   end
+# 
+#   def push(input, &block)
+#     promise = Concurrent::Promises.resolvable_future
+#     @flag.synchronize do
+#       @buffer.push([input, promise])
+#       if @buffer.length == 1
+#         @sleeper = Thread.new { sleeper(&block) }
+#       end
+#       interrupt_sleep if @buffer.length == @size
+#     end
+#     promise
+#   end
+# 
+#   private
+#   def sleeper(&block)
+#     interruptible_sleep @time
+#     entries = @flag.synchronize { get_and_clear }
+#     results = block[entries.map(&:first)]
+#     entries.zip(results) { |(_, future), result| future.fulfill result }
+#   end
+# 
+#   def get_and_clear
+#     old_buffer = @buffer
+#     @buffer = []
+#     @sleeper = nil
+#     old_buffer
+#   end
+# 
+#   def interruptible_sleep(seconds)
+#     @_sleep_check, @_sleep_interrupt = IO.pipe
+#     IO.select([@_sleep_check], nil, nil, seconds)
+#   end
+# 
+#   def interrupt_sleep
+#     @_sleep_interrupt.close if @_sleep_interrupt and !@_sleep_interrupt.closed?
+#   end
+# end
+
+class StreetMapTileServer < TileServer
+  def initialize(url:, lookup_url:, namespace:, folder:, tile_size:)
+    super(namespace, folder, false, false)
+    @url = url
+    @lookup_url = lookup_url
+    @format = "image/gif"
+    @extension = "gif"
+    @tile_size = tile_size
+    # @fetch_queue = Buffer.new(4, 0.1)
+  end
+
+  attr_reader :format, :lookup_url, :tile_size
+
+  def joiner() '-' end
+
+  def new_with_zoom(zoom) self end
+
+  def fetch(smref)
+    @fetch_queue.update { |queue| queue + [smref] }
+    sleep
+  end
+
+  def path_to_tile(smref) "#{smref}.#{@extension}" end
+  def url_to_tile(smref)
+    # code = @fetch_queue.push(smref) do |smrefs|
+    #   uri = URI("https://streetmap.co.uk/ajaxtpm.srf?tl=#{smrefs.map(&method(:to_os)).flatten.join("|")}&z=115&tp=b")
+    #   uri.open(ssl_verify_mode: OpenSSL::SSL::VERIFY_NONE) { |f|
+    #     f.lazy.drop(2).take(smrefs.size).to_a
+    #   }.map { |line|
+    #     _, rest, tile = line.split("@")
+    #     sprintf(@url, tile, rest)
+    #   }
+    # end
+    # code.value
+   uri = URI(lookup_url % to_os(smref).join("|"))
+    _, rest, tile = uri.open(ssl_verify_mode: OpenSSL::SSL::VERIFY_NONE) { |f|
+      f.lazy.drop(2).next.split("@")
+    }
+    sprintf(@url, tile, rest)
+  end
+
+  def floor(x)
+    (((x / tile_size).floor) * tile_size).to_i
+  end
+
+  def move(smref, dx, dy)
+   easting, northing = to_os(smref)
+   from_os(
+     easting + dx * tile_size,
+     northing - dy * tile_size,
+   )
+  end
+  
+  def proportion(smref, (easting, northing))
+    bl_easting, bl_northing = to_os(smref)
+    tr_easting, tr_northing = to_os(move(smref, 1, -1))
+    return [
+      (easting.to_f - bl_easting) / (tr_easting.to_f - bl_easting),
+      # negated because the coordinate system is reversed: low y is south
+      1 - (northing.to_f - bl_northing) / (tr_northing.to_f - bl_northing),
+    ]
+  end
+
+  def scale_factor_at(center) tile_size / 1000.0 end
+
+  def from_os(easting, northing)
+    [easting, northing].map(&method(:floor)).join(joiner)
+  end
+  
+  def to_os(smref)
+    smref.split(joiner).map(&:to_i)
+  end
+end
+
+class ZXYTileServer < TileServer
+  def initialize(url:, namespace:, folder:, zoom: 15, zooms: nil, grid_lines:, os_north:)
+    super(namespace, folder, grid_lines, os_north)
+    @url = url
+    @format = "image/jpeg"
+    @extension = "jpg"
+    @zooms = zooms || [zoom]
+    @zoom = closest_zoom(zoom)
+  end
+
+  attr_reader :format
+
+  def new_with_zoom(zoom)
+    ZXYTileServer.new(url: @url, namespace: namespace, folder: @folder, zoom: new_zoom, zooms: @zooms, grid_lines: grid_lines, os_north: os_north)
+  end
+
+  def split(zxy) zxy.split('/').map(&:to_i) end
+  def join(z, x, y) [z, x, y].join('/') end
+
+  def path_to_tile(zxy) "#{zxy.gsub('/','-')}.#{@extension}" end
+  def url_to_tile(zxy)
+    z,x,y = split(zxy)
+    @url
+      .gsub(/\{((?:\w+\|)+\w+)\}/) { $1.split('|').sample }
+      .gsub(/\{(\w)\}/) { { 'z' => z, 'x' => x, 'y' => y }[$1] }
+  end
+
+  def move(zxy, dx, dy)
+    z,x,y = split(zxy)
+
+    join(z, x+dx, y+dy)
+  end
+
+  def from_ll(lat, long)
+    z = @zoom
+    lat_rad = lat/180 * Math::PI
+    n = 2.0 ** z
+    x = ((long + 180.0) / 360.0 * n).to_i
+    y = ((1.0 - Math::log(Math::tan(lat_rad) + (1 / Math::cos(lat_rad))) / Math::PI) / 2.0 * n).to_i
+    join(z, x, y)
+  end
+
+  def to_ll(zxy)
+    z,x,y = split(zxy)
+
+    n = 2.0 ** z
+    long = x / n * 360.0 - 180.0
+    lat_rad = Math::atan(Math::sinh(Math::PI * (1 - 2 * y / n)))
+    lat = 180.0 * (lat_rad / Math::PI)
+    return lat, long 
+  end
+end
+
+def create_tile_servers(default, *others)
+  hash = {}
+  [default, *others].each do |tile_server|
+    hash[tile_server.namespace] = tile_server
+  end
+  hash.default = default
+  hash
+end
+
 $page_sizes = {
   "A5" => [21.0, 14.8, 'A5 landscape'], # cm
   "A5-portrait" => [14.8, 21.0, 'A5 portrait'], # cm
@@ -47,93 +385,15 @@ $page_sizes.default = $page_sizes['A4']
 $w = 2
 $h = 2
 
-$format = ENV["TILE_SERVER"] || "%s"
+$grid_lines = !!ENV["GRID_LINES"]
+$cache = ENV["TILE_CACHE"] || "tilecache"
+$format = ENV["TILE_SERVER"] || "%"
 $proxy_format = "/tile/%s"
 $port = ENV["ATLAS_PORT"] || 5000
 
-def move_one(q, negative = false, dimension = 1)
-  pre = q[0..-2]
-  return '' if q.empty?
-  tail = q[-1].to_i
-  new_pre = ((tail & dimension) == 0) ^ negative ? pre : move_one(pre, negative, dimension)
-  return new_pre + (tail ^ dimension).to_s
-end
-
-def move(q, dx, dy)
-  while dx > 0
-    q = move_one(q, false, 1)
-    dx -= 1
-  end
-
-  while dx < 0
-    q = move_one(q, true, 1)
-    dx += 1
-  end
-
-  while dy > 0
-    q = move_one(q, false, 2)
-    dy -= 1
-  end
-
-  while dy < 0
-    q = move_one(q, true, 2)
-    dy += 1
-  end
-
-  q
-end
-
-def coords_from_latlong_deg(lat, long)
-  latlong = GlobalConvert::Location.new(
-    input: {
-      projection: :wgs84,
-      lon: long * Math::PI / 180,
-      lat: lat * Math::PI / 180,
-    },
-    output: {
-      projection: :osgb36
-    }
-  )
-  return latlong.lon, latlong.lat
-end
-
-def latlong_deg_from_coords(easting, northing)
-  latlong = GlobalConvert::Location.new(
-    input: {
-      projection: :osgb36,
-      lon: easting,
-      lat: northing,
-    },
-    output: {
-      projection: :wgs84
-    }
-  )
-
-  return latlong.lat / Math::PI * 180, latlong.lon / Math::PI * 180
-end
-
-def proportion(q, location)
-  tl_latitude, tl_longitude = Quadkey.decode(q)
-  br_latitude, br_longitude = Quadkey.decode(move(q,1,1))
-
-  latitude, longitude = latlong_deg_from_coords(location.easting.to_i, location.northing.to_i)
-
-  return (longitude - tl_longitude) / (br_longitude - tl_longitude), (latitude - tl_latitude) / (br_latitude - tl_latitude)
-end
-
-def quad_to_coords(q)
-  latitude, longitude = Quadkey.decode(q)
-  easting, northing = coords_from_latlong_deg(latitude, longitude)
-  return easting, northing
-end
-
-def quadkey_for_location(location)
-  latitude, longitude = latlong_deg_from_coords(location.easting.to_i, location.northing.to_i)
-  return Quadkey.encode(latitude, longitude, 15)
-end
-
 def terminal_response(center)
   Dir.chdir(File.dirname(__FILE__))
+  # TODO: fix this
   centerQ = quadkey_for_location(OsMapRef::Location.for(center))
   (-$h..$h).each do |y|
     line = (-$w..$w).map do |x|
@@ -143,23 +403,24 @@ def terminal_response(center)
   end
 end
 
-def loc_for_coords(easting, northing)
-  return OsMapRef::Location.for([
+def ref_for_coords(easting, northing)
+  OsMapRef::Location.for([
     "%06d" % easting,
     "%06d" % northing,
-  ].join(','))
+  ].join(',')).map_reference
 end
 
-def ref_for_coords(easting, northing)
-  loc_for_coords(easting, northing).map_reference
+def coords_for_ref(center)
+  ref = OsMapRef::Location.for(center)
+  return ref.easting.to_i, ref.northing.to_i
 end
 
 # in kilometers
 def offset_grid_ref(center, dx, dy)
-  ref = OsMapRef::Location.for(center)
+  easting, northing = coords_for_ref(center)
   ref_for_coords(
-    ref.easting.to_i+(1000*dx),
-    ref.northing.to_i+(1000*dy),
+    easting+(1000*dx),
+    northing+(1000*dy),
   )
 end
 
@@ -173,8 +434,8 @@ def neighbours(center,w,h)
 end
 
 def calculateCenters(points, padding, page_setup)
-  easting_limits = points.map { |ref| OsMapRef::Location.for(ref).easting.to_i }.minmax
-  northing_limits = points.map { |ref| OsMapRef::Location.for(ref).northing.to_i }.minmax
+  easting_limits = points.map { |ref| coords_for_ref(ref)[0] }.minmax
+  northing_limits = points.map { |ref| coords_for_ref(ref)[1] }.minmax
   mid = ref_for_coords(easting_limits.reduce(:+) / 2.0, northing_limits.reduce(:+) / 2.0)
   easting_range = (easting_limits[1] - easting_limits[0])/1000.0 + padding # km
   northing_range = (northing_limits[1] - northing_limits[0])/1000.0 + padding # km
@@ -235,6 +496,8 @@ def webHead(page_setup)
         display: block;
       }
 
+      .center .corner { position: absolute; }
+
       .minimap {
         position: absolute;
         bottom: 100%;
@@ -254,18 +517,19 @@ def webHead(page_setup)
         background-color: #999;
       }
 
-      .corner {
+      .grid-letters {
         position: absolute;
         width: #{page_setup.northing_axis}cm;
         height: #{page_setup.easting_axis}cm;
       }
-      .corner.top-left { bottom: 100%; right: 100%; }
-      .corner.top-right { bottom: 100%; left: 100%; }
-      .corner.bottom-left { top: 100%; right: 100%; }
-      .corner.bottom-right { top: 100%; left: 100%; }
+      .grid-letters.top { bottom: 100%; }
+      .grid-letters.bottom { top: 100%; }
+      .grid-letters.left { right: 100%; }
+      .grid-letters.right { left: 100%; }
 
       .border {
         position: absolute;
+        overflow: hidden;
       }
       .border.vertical {
         width: 100%;
@@ -295,160 +559,43 @@ def webHead(page_setup)
         justify-content: center;
       }
 
+      .grid-line {
+        position: absolute;
+        z-index: 1;
+        border-left: 1px solid lightskyblue;
+      }
+      .grid-line.easting {
+        height: 200vh;
+        margin: -100vh -0.5px;
+      }
+      .grid-line.northing {
+        height: 200vw;
+        margin: -100vw -0.5px;
+      }
     </style>
-    <script>
-      const sleep = (t = 0) => new Promise(resolve => setTimeout(resolve, t));
-      const makeSingleSleeper = () => {
-        let timeout = 0;
-        return (t = 0) => new Promise(resolve => {
-          clearTimeout(timeout);
-          timeout = setTimeout(resolve, t);
-        });
-      }
-
-      const lineExtension = (xy1, xy2, x) => {
-        const [x1, y1] = xy1;
-        const [x2, y2] = xy2;
-        return (y2-y1)/(x2-x1) * (x - x1) + y1;
-      }
-
-      const proportion = (a, b, p) => {
-        return a * (1-p) + b * p;
-      }
-
-      const makeLabel = (number, style) => {
-        const label = document.createElement('div');
-        label.classList.add('axis-label');
-        label.innerText = (""+number).slice(-2);
-        Object.assign(label.style, style);
-        return label;
-      };
-
-      const addAxisTick = (element, labelText, offsetProperty, offsetValue) => {
-        element.appendChild(
-          makeLabel(labelText, {
-            [offsetProperty]: offsetValue + 'px',
-          }),
-        );
-      };
-
-      const addDimensionTicks = (elements, baseLine, nextLine, offsetProperty, coordinateLabel, axisSize, container, getIntersect) => {
-        for (const element of elements) {
-          element.innerHTML = '';
-          const bounds = element.getBoundingClientRect();
-
-          const baseCoordinate = Math.floor(container.dataset[coordinateLabel]/1000.0);
-          const baseTickIntersect = getIntersect(bounds, baseLine);
-          const nextTickIntersect = getIntersect(bounds, nextLine);
-          const axisLength = bounds[axisSize];
-          const tickSep = nextTickIntersect - baseTickIntersect;
-
-          for (let intersect = baseTickIntersect, coordinate = baseCoordinate;
-               0 <= intersect && intersect <= axisLength;
-               intersect -= tickSep, coordinate --) {
-            addAxisTick(element, coordinate, offsetProperty, intersect);
-          }
-          for (let intersect = nextTickIntersect, coordinate = baseCoordinate + 1;
-               0 <= intersect && intersect <= axisLength;
-               intersect += tickSep, coordinate ++) {
-            addAxisTick(element, coordinate, offsetProperty, intersect);
-          }
-        }
-      };
-
-      const addAllTicks = () => {
-        for (const container of document.querySelectorAll('.container')) {
-          const tileBounds = container.querySelector('.center').getBoundingClientRect();
-          const corners = container.dataset;
-          const cornerXY = (corner) => [
-            proportion(tileBounds.left, tileBounds.right, JSON.parse(corner)[0]),
-            proportion(tileBounds.top, tileBounds.bottom, JSON.parse(corner)[1]),
-          ];
-
-          addDimensionTicks(
-            container.querySelectorAll('.border.horizontal'),
-            [cornerXY(corners.bottomLeft), cornerXY(corners.bottomRight)],
-            [cornerXY(corners.topLeft), cornerXY(corners.topRight)],
-            'top', 'northing', 'height', container,
-            (bounds, [corner1, corner2]) => lineExtension(
-              corner1,
-              corner2,
-              (bounds.left + bounds.right) / 2,
-            ) - bounds.y,
-          );
-
-          addDimensionTicks(
-            container.querySelectorAll('.border.vertical'),
-            [cornerXY(corners.bottomLeft), cornerXY(corners.topLeft)],
-            [cornerXY(corners.bottomRight), cornerXY(corners.topRight)],
-            'left', 'easting', 'width', container,
-            (bounds, [corner1, corner2]) => lineExtension(
-              corner1.slice().reverse(),
-              corner2.slice().reverse(),
-              (bounds.top + bounds.bottom) / 2,
-            ) - bounds.x,
-          );
-        }
-      };
-
-      const resizeSleep = makeSingleSleeper();
-      window.addEventListener("resize", async () => {
-        await resizeSleep(10);
-        addAllTicks();
-      });
-
-      window.addEventListener("afterprint", () => {
-        // document.body.classList.remove('printing');
-        addAllTicks();
-      });
-      window.addEventListener("beforeprint", () => {
-        // document.body.classList.add('printing');
-        addAllTicks();
-      });
-      window.addEventListener("DOMContentLoaded", () => {
-        addAllTicks();
-      });
-
-      const addMap = async (direction) => {
-        const res = await fetch(`/?center=${direction}&partial`);
-        const html = await res.text();
-        document.body.insertAdjacentHTML('beforeend',html);
-        addAllTicks();
-      };
-    </script>
+    <script src="./atlas.js"></script>
   </head>
 HTML
-end
-
-def scale_factor_at(center)
-  location = OsMapRef::Location.for(center)
-  centerQ = quadkey_for_location(location)
-
-  square_left_lat, square_left_long = latlong_deg_from_coords(location.easting.to_i.floor(-3), location.northing.to_i)
-  square_right_lat, square_right_long = latlong_deg_from_coords(location.easting.to_i.floor(-3)+1000, location.northing.to_i)
-  _, tile_left_long = Quadkey.decode(centerQ)
-  _, tile_right_long = Quadkey.decode(move(centerQ,1,0))
-
-  true_square_length = ((square_right_long - square_left_long)**2 + (square_right_lat - square_left_lat)**2)**0.5
-
-  return (tile_right_long - tile_left_long) / true_square_length
 end
 
 def corner_label(center, dx, dy, page_setup)
   offset_grid_ref(
     center,
-    dx * page_setup.scaled_map_width(true) / 2,
-    dy * page_setup.scaled_map_height(true) / 2,
+    dx * page_setup.scaled_map_width() / 2,
+    dy * page_setup.scaled_map_height() / 2,
   )
 end
 
-def webResponseSingle(center, page_setup, minimap="")
-  location = OsMapRef::Location.for(center)
-  centerQ = quadkey_for_location(location)
+def webResponseSingle(center, tile_server, page_setup, minimap="")
+  easting, northing = coords_for_ref(center)
+  
+  # normalize input 
+  center = ref_for_coords(easting, northing)
+  centerTile = tile_server.from_os(easting, northing)
 
-  scale_factor = scale_factor_at(center)
+  scale_factor = tile_server.scale_factor_at(center)
 
-  cell_pos_x, cell_pos_y = proportion(centerQ, location)
+  cell_pos_x, cell_pos_y = tile_server.proportion(centerTile, [easting, northing])
   
   res = StringIO.new
 
@@ -458,43 +605,37 @@ def webResponseSingle(center, page_setup, minimap="")
     page_setup.scaled_map_height(true),
   )
 
+  corner_of_center_square = -> (dx, dy) do
+    tile_server.proportion(centerTile, [
+      easting.floor(-3) + dx * 1000,
+      northing.floor(-3) + dy * 1000,
+    ])
+  end
+
+  cell_side = corner_of_center_square[0,0].zip(corner_of_center_square[0,1]).map { |(a,b)| a - b }
+  true_north = Math::atan2(*cell_side)
+
   res << <<END
     <div
       class="container"
-      data-center="#{location.map_reference}"
-      data-easting="#{location.easting.to_i}"
-      data-northing="#{location.northing.to_i}"
-      data-top-left="#{proportion(centerQ, loc_for_coords(
-        location.easting.to_i.floor(-3),
-        location.northing.to_i.floor(-3)+1000,
-      ))}"
-      data-top-right="#{proportion(centerQ, loc_for_coords(
-        location.easting.to_i.floor(-3)+1000,
-        location.northing.to_i.floor(-3)+1000,
-      ))}"
-      data-bottom-left="#{proportion(centerQ, loc_for_coords(
-        location.easting.to_i.floor(-3),
-        location.northing.to_i.floor(-3),
-      ))}"
-      data-bottom-right="#{proportion(centerQ, loc_for_coords(
-        location.easting.to_i.floor(-3)+1000,
-        location.northing.to_i.floor(-3),
-      ))}"
+      data-center="#{center}"
+      data-easting="#{easting}"
+      data-northing="#{northing}"
       data-north="#{up}"
       data-south="#{down}"
       data-west="#{left}"
       data-east="#{right}"
     >
       <style>
-        .container[data-center='#{location.map_reference}'] table img {
+        .container[data-center='#{center}'] table img {
           width: #{page_setup.scale*scale_factor}cm;
           height: #{page_setup.scale*scale_factor}cm;
         }
       </style>
-      <div class="corner top-left">#{corner_label(center, -1, 1, page_setup)[0..2]}</div>
-      <div class="corner bottom-left">#{corner_label(center, -1, -1, page_setup)[0..2]}</div>
-      <div class="corner top-right">#{corner_label(center, 1, 1, page_setup)[0..2]}</div>
-      <div class="corner bottom-right">#{corner_label(center, 1, -1, page_setup)[0..2]}</div>
+      <div class="grid-letters top left">#{corner_label(center, -1, 1, page_setup)[0..2]}</div>
+      <div class="grid-letters bottom left">#{corner_label(center, -1, -1, page_setup)[0..2]}</div>
+      <div class="grid-letters top right">#{corner_label(center, 1, 1, page_setup)[0..2]}</div>
+      <div class="grid-letters bottom right">#{corner_label(center, 1, -1, page_setup)[0..2]}</div>
       <div class="border vertical pre"></div>
       <div class="border vertical post"></div>
       <div class="border horizontal pre"></div>
@@ -502,10 +643,16 @@ def webResponseSingle(center, page_setup, minimap="")
       #{minimap}
       <div class='map'>
         <table
-          style="margin-top: #{-page_setup.scale*cell_pos_y}cm;
-                 margin-bottom: #{-page_setup.scale*(1-cell_pos_y)}cm;
-                 margin-left: #{-page_setup.scale*cell_pos_x}cm;
-                 margin-right: #{-page_setup.scale*(1-cell_pos_x)}cm;"
+          style="margin-top: #{-page_setup.scale*scale_factor*cell_pos_y}cm;
+                 margin-bottom: #{-page_setup.scale*scale_factor*(1-cell_pos_y)}cm;
+                 margin-left: #{-page_setup.scale*scale_factor*cell_pos_x}cm;
+                 margin-right: #{-page_setup.scale*scale_factor*(1-cell_pos_x)}cm;
+                 #{tile_server.os_north ? "
+                   transform: rotate(#{true_north}rad);
+                 ":''}
+                 transform-origin:
+                  calc(50% + #{page_setup.scale*cell_pos_x}cm / 2 - #{page_setup.scale*(1-cell_pos_x)}cm / 2)
+                  calc(50% + #{page_setup.scale*cell_pos_y}cm / 2 - #{page_setup.scale*(1-cell_pos_y)}cm / 2);"
         >
 END
 
@@ -514,14 +661,32 @@ END
   (-h..h).each do |y|
     res << "<tr>"
     line = (-w..w).map do |x|
-      move(centerQ, x, y)
+      tile_server.move(centerTile, x, y)
     end
     line.each_with_index do |cell,i|
       center = y == 0 && i == w
       res << "<td "
       res << "class='center'" if center
       res << ">"
-      res << "<img src=\"#{sprintf($proxy_format, cell)}\">"
+      if center
+        ['bottom', 'top'].each_with_index do |vertical, y|
+          ['left', 'right'].each_with_index do |horizontal, x|
+            left, top = corner_of_center_square[x, y]
+            res << "<div
+              class='corner #{vertical} #{horizontal}'
+              style='left: #{left*100}%; top: #{top*100}%;'
+              data-left='#{left}'
+              data-top='#{top}'
+            ></div>"
+          end
+        end
+        res << "<div
+          class='corner'
+          style='left: #{cell_pos_x*100}%; top: #{cell_pos_y*100}%;'
+        ></div>"
+        res << "<div class='grid-lines'></div>" if tile_server.grid_lines
+      end
+      res << %Q(<img src="#{tile_server.proxy_to_tile(cell)}" alt="#{cell}">)
       res << "</td>"
     end
     res << "</tr>"
@@ -556,7 +721,7 @@ def minimap(page_setup, i, xcount, ycount)
   minimap.string
 end
 
-def webResponse(centers, partial, page_setup, xcount = 0, ycount = 0)
+def webResponse(centers, partial, tile_server, page_setup, xcount = 0, ycount = 0)
   res = StringIO.new
   
   unless partial
@@ -565,40 +730,75 @@ def webResponse(centers, partial, page_setup, xcount = 0, ycount = 0)
     res << '<body class="printing">'
   end
   centers.each_with_index do |center, i|
-    res << webResponseSingle(center, page_setup, minimap(page_setup, i, xcount, ycount))
+    res << webResponseSingle(center, tile_server, page_setup, minimap(page_setup, i, xcount, ycount))
   end
   res << '</body></html>' unless partial
   res.string
 end
 
-if terminal
+if $stdout.isatty && ARGV[1]
   terminal_response(ARGV.join(""))  
 else
   dev_stdout = WEBrick::Log.new(STDOUT, WEBrick::BasicLog::ERROR)
   server = WEBrick::HTTPServer.new(Port: $port, Logger: dev_stdout, AccessLog: [])
   trap 'TERM' do server.shutdown end
   trap 'INT' do server.shutdown end
-  
+
+  config = YAML.load_file("atlasrc.yaml")
+
+  tile_servers = create_tile_servers(
+    *config.filter_map { |server|
+      server.transform_keys!(&:to_sym)
+      server_type = {
+        'zxy' => ZXYTileServer,
+        'streetmap' => StreetMapTileServer,
+        'quadkey' => QuadkeyTileServer,
+      }[server[:type]]
+      if server_type.nil?
+        STDERR.puts "Unknown server type #{server[:type].inspect}"
+        next
+      end
+      server.delete(:type)
+      server_type.new(**server)
+    }
+  )
+
   server.mount_proc '/' do |req, res|
     case req.path
-    when %r"^/tile/(\d+)$"
-      quadkey = $~[1]
-      folder = File.join(File.dirname(__FILE__), 'tilecache')
+    when %r"^/tile/([-\w]+)/(.+)$"
+      namespace = $1
+      tile = $2
+      tile_server = tile_servers[namespace]
+      folder = File.join(File.dirname(__FILE__), tile_server.folder)
 
       FileUtils.mkdir_p(folder)
-      cache_path = File.join(folder, quadkey+'.jpg')
-      unless File.exist?(cache_path)
-        puts "Fetching #{quadkey}"
-        tempfile = Down.download(sprintf($format, quadkey))
-        FileUtils.mv(tempfile.path, cache_path)
+      cache_path = File.join(folder, tile_server.path_to_tile(tile))
+      catch :errored do
+        unless File.exist?(cache_path)
+          #puts "Fetching #{tile}"
+          puts "Fetching #{tile} from #{tile_server.url_to_tile(tile)}"
+          begin
+            tempfile = Down.download(tile_server.url_to_tile(tile), ssl_verify_mode: OpenSSL::SSL::VERIFY_NONE)
+            FileUtils.mv(tempfile.path, cache_path)
+          rescue => e
+            puts "Unable to fetch #{tile} from #{tile_server.url_to_tile(tile)}, because #{e.inspect}."
+            res.status = 404
+            res.body = ''
+            throw :errored
+          end
+        end
+        res.header["Content-Type"] = tile_server.format
+        res.header["Cache-Control"] = "public"
+        res.header["Expires"] = "never"
+        res.body = File.new(cache_path, "r")
       end
-      res.header["Content-Type"] = "image/jpeg"
-      res.header["Cache-Control"] ="public"
-      res.header["Expires"] ="never"
-      res.body = File.new(cache_path, "r")
+    when '/atlas.js'
+      res.header["Content-Type"] = "text/javascript"
+      res.body = File.new('atlas.js', 'r')
     when '/'
       centers = req.query['center']
       partial = req.query['partial']
+      tile_server = tile_servers[req.query['style']].with_zoom(req.query['zoom'])
       paper = $page_sizes[req.query['paper']]
       margin = req.query['margin'] ? req.query['margin'].to_f : 0.5
       scale = req.query['scale'] ? req.query['scale'].to_i : 4
@@ -613,7 +813,7 @@ else
       end
       if centers
         res.header['Content-Type'] = "text/html; charset=utf-8"
-        res.body = webResponse(centers.split(','), !!partial, page_setup, xcount, ycount)
+        res.body = webResponse(centers.split(','), !!partial, tile_server, page_setup, xcount, ycount)
       else
         res.status = 400
         res.body = "No center given"
