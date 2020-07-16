@@ -8,7 +8,9 @@ For best results, view in Firefox.
 
 ## Usage
 
-Choose tile servers by copying the `atlasrc.yaml.sample` to `atlasrc.yaml`.
+Atlas is written in Ruby 2.7, so you will need to install it if you haven’t already. If you get a `GemNotFoundException`, then `gem install` any missing dependencies.
+
+Clone the file `atlasrc.yaml.sample` into `atlasrc.yaml`.
 
 Run the server
 ```
@@ -32,6 +34,8 @@ The `center` argument is an OS grid reference, or comma-separated list thereof (
 `./atlas TL123456`: display the map in a terminal, using [iTerm](https://www.iterm2.com)’s [image API](https://www.iterm2.com/documentation-images.html).
 
 The port can be set using the environment variable `ATLAS_PORT`, otherwise it will default to 5000.
+
+The configuration file can be specified using the environment variable `ATLAS_RC`, otherwise it will default to `./atlasrc.yaml`.
 
 ### HTTP Arguments
 

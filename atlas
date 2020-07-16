@@ -385,21 +385,17 @@ $page_sizes.default = $page_sizes['A4']
 $w = 2
 $h = 2
 
-$grid_lines = !!ENV["GRID_LINES"]
-$cache = ENV["TILE_CACHE"] || "tilecache"
-$format = ENV["TILE_SERVER"] || "%"
-$proxy_format = "/tile/%s"
 $port = ENV["ATLAS_PORT"] || 5000
+$config_file = ENV["ATLAS_RC"] || 'atlasrc.yaml'
 
-def terminal_response(center)
+def terminal_response(center, tile_server)
   Dir.chdir(File.dirname(__FILE__))
-  # TODO: fix this
-  centerQ = quadkey_for_location(OsMapRef::Location.for(center))
+  center_tile = tile_server.from_os(*coords_for_ref(center))
   (-$h..$h).each do |y|
     line = (-$w..$w).map do |x|
-      move(centerQ, x, y)
+      tile_server.move(center_tile, x, y)
     end
-    system("./imgrow -u #{line.join(' ')}")
+    system("./imgrow -u #{line.map { |cell| tile_server.url_to_tile(cell).inspect }.join(' ')}")
   end
 end
 
@@ -736,32 +732,37 @@ def webResponse(centers, partial, tile_server, page_setup, xcount = 0, ycount = 
   res.string
 end
 
-if $stdout.isatty && ARGV[1]
-  terminal_response(ARGV.join(""))  
+config =
+  begin
+    YAML.load_file($config_file)
+  rescue
+    abort("Cannot find config file #{$config_file.inspect}, have you tried copying the sample one?")
+  end
+
+tile_servers = create_tile_servers(
+  *config.filter_map { |server|
+    server.transform_keys!(&:to_sym)
+    server_type = {
+      'zxy' => ZXYTileServer,
+      'streetmap' => StreetMapTileServer,
+      'quadkey' => QuadkeyTileServer,
+    }[server[:type]]
+    if server_type.nil?
+      STDERR.puts "Unknown server type #{server[:type].inspect}"
+      next
+    end
+    server.delete(:type)
+    server_type.new(**server)
+  }
+)
+
+if $stdout.isatty && ARGV[0]
+  terminal_response(ARGV.join(" "), tile_servers.default)
 else
   dev_stdout = WEBrick::Log.new(STDOUT, WEBrick::BasicLog::ERROR)
   server = WEBrick::HTTPServer.new(Port: $port, Logger: dev_stdout, AccessLog: [])
   trap 'TERM' do server.shutdown end
   trap 'INT' do server.shutdown end
-
-  config = YAML.load_file("atlasrc.yaml")
-
-  tile_servers = create_tile_servers(
-    *config.filter_map { |server|
-      server.transform_keys!(&:to_sym)
-      server_type = {
-        'zxy' => ZXYTileServer,
-        'streetmap' => StreetMapTileServer,
-        'quadkey' => QuadkeyTileServer,
-      }[server[:type]]
-      if server_type.nil?
-        STDERR.puts "Unknown server type #{server[:type].inspect}"
-        next
-      end
-      server.delete(:type)
-      server_type.new(**server)
-    }
-  )
 
   server.mount_proc '/' do |req, res|
     case req.path
