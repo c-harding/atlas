@@ -452,11 +452,11 @@ def calculate_centers(points, padding, page_setup)
   northing_range = (northing_limits[1] - northing_limits[0])/1000.0 + padding # km
   xcount = [0, (easting_range / page_setup.scaled_map_width(true)).floor].max
   ycount = [0, (northing_range / page_setup.scaled_map_height(true)).floor].max
-  min = offset_grid_ref(mid, - page_setup.width * xcount / 2, - page_setup.height * ycount / 2)
+  min = offset_grid_ref(mid, - page_setup.scaled_map_width(true) * xcount / 2, - page_setup.scaled_map_height(true) * ycount / 2)
 
   return (0..ycount).to_a.reverse.flat_map { |y|
     (0..xcount).map { |x|
-      offset_grid_ref(min, x*page_setup.width, y*page_setup.height)
+      offset_grid_ref(min, x*page_setup.scaled_map_width(true), y*page_setup.scaled_map_height(true))
     }
   }.join(','), xcount + 1, ycount + 1
 end
