@@ -1,0 +1,9 @@
+AllCops:
+  TargetRubyVersion: 2.7
+  NewCops: enable
+Style/AccessModifierDeclarations:
+  EnforcedStyle: inline
+Layout/DefEndAlignment:
+  AutoCorrect: true
+Layout/EndAlignment:
+  AutoCorrect: true

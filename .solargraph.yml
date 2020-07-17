@@ -1,0 +1,9 @@
+include:
+  - '**/*.rb'
+  - 'atlas'
+
+reporters:
+  - rubocop
+  - require_not_found
+  - typecheck
+  - update_errors
