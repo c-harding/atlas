@@ -8,6 +8,8 @@ require 'open-uri'
 require 'fileutils'
 require 'concurrent'
 require 'down'
+require 'mime/types'
+require 'nokogiri'
 
 $page_sizes = {
   "A5" => [21.0, 14.8, 'A5 landscape'], # cm
@@ -22,11 +24,16 @@ $page_sizes.default = $page_sizes['A4']
 $w = 2
 $h = 2
 
-$port = ENV["ATLAS_PORT"] || 5000
-$config_file = ENV["ATLAS_RC"] || 'atlasrc.yaml'
-$address = ENV["ATLAS_ADDRESS"] || '127.0.0.1'
+def parse_config
+  return {
+    port: ENV["ATLAS_PORT"] || 5000,
+    rc_file: ENV["ATLAS_RC"] || 'atlasrc.yaml',
+    address: ENV["ATLAS_ADDRESS"] || '127.0.0.1',
+    offline: !ENV["ATLAS_OFFLINE"].empty?,
+  }
+end
 
-PageSetup = Struct.new(:paper, :scale, :page_margin) do
+PageSetup = Struct.new(:paper, :scale, :page_margin, :os_north, :grid_lines) do
   def initialize(*) super
     @northing_axis = 0.75 # cm
     @easting_axis = 0.5 # cm
@@ -51,17 +58,26 @@ PageSetup = Struct.new(:paper, :scale, :page_margin) do
   def paper_name() paper[2] end
 end
 
+# Allow splatting hashes
+class NilClass
+  def to_hash() {} end
+  def empty?() true end
+end
+
 class TileServer
-  def initialize(namespace, folder, grid_lines, os_north)
-    @namespace = namespace
+  def initialize(id:, folder:, title: nil, grid_lines:, os_north:, zoom: nil, zooms: nil)
+    @id = id
     @folder = folder
     @grid_lines = grid_lines
     @os_north = os_north
+    @title = title || id
+    @zooms = zooms || (zoom.nil? ? 8..16 : [zoom])
+    @zoom = closest_zoom(zoom || 14)
   end
 
-  attr_reader :namespace, :folder, :grid_lines, :os_north
-
-  def proxy_to_tile(tile) "/tile/#{namespace}/#{tile}" end
+  attr_reader :id, :folder, :grid_lines, :os_north, :title, :zoom, :zooms
+  
+  def proxy_to_tile(tile) "/tile/#{id}/#{tile}" end
 
   def from_os(easting, northing)
     latitude, longitude = latlong_deg_from_coords(easting, northing)
@@ -133,11 +149,14 @@ class TileServer
     if zoom.nil?
       @zoom
     elsif @zooms.include? zoom
-      zoom
-    elsif @zooms.min > 15
+      @zooms.is_a?(Range) ? zoom.round : zoom
+    elsif @zooms.min > zoom
       @zooms.min
-    else
+    elsif @zooms.max < zoom
       @zooms.max
+    else
+      i = @zooms.bsearch_index { |x| x >= zoom }
+      @zooms[i] - zoom <= zoom - @zooms[i-1] ? @zooms[i] : @zooms[i-1]
     end
   end
 
@@ -153,19 +172,17 @@ class TileServer
 end
 
 class QuadkeyTileServer < TileServer
-  def initialize(url:, namespace:, folder:, zoom: 15, zooms: nil, grid_lines:, os_north:)
-    super(namespace, folder, grid_lines, os_north)
+  def initialize(url:, **rest)
+    super(**rest)
     @url = url
     @format = "image/jpeg"
     @extension = "jpg"
-    @zoom = zoom
-    @zooms = zooms || [zoom]
   end
 
   attr_reader :format
 
   def new_with_zoom(zoom)
-    QuadkeyTileServer.new(url: @url, namespace: namespace, folder: @folder, zoom: new_zoom, zooms: @zooms, grid_lines: grid_lines, os_north: os_north)
+    QuadkeyTileServer.new(url: @url, id: id, folder: @folder, zoom: zoom, zooms: @zooms, grid_lines: grid_lines, os_north: os_north)
   end
 
   def path_to_tile(quadkey) "#{quadkey}.#{@extension}" end
@@ -254,8 +271,8 @@ end
 # end
 
 class StreetMapTileServer < TileServer
-  def initialize(url:, lookup_url:, namespace:, folder:, tile_size:)
-    super(namespace, folder, false, false)
+  def initialize(url:, lookup_url:, tile_size:, **rest)
+    super(grid_lines: false, os_north: false, **rest)
     @url = url
     @lookup_url = lookup_url
     @format = "image/gif"
@@ -328,19 +345,17 @@ class StreetMapTileServer < TileServer
 end
 
 class ZXYTileServer < TileServer
-  def initialize(url:, namespace:, folder:, zoom: 15, zooms: nil, grid_lines:, os_north:)
-    super(namespace, folder, grid_lines, os_north)
+  def initialize(url:, **rest)
+    super(**rest)
     @url = url
     @format = "image/jpeg"
     @extension = "jpg"
-    @zooms = zooms || [zoom]
-    @zoom = closest_zoom(zoom)
   end
 
   attr_reader :format
 
   def new_with_zoom(zoom)
-    ZXYTileServer.new(url: @url, namespace: namespace, folder: @folder, zoom: new_zoom, zooms: @zooms, grid_lines: grid_lines, os_north: os_north)
+    ZXYTileServer.new(url: @url, id: id, folder: @folder, zoom: zoom, zooms: @zooms, grid_lines: grid_lines, os_north: os_north)
   end
 
   def split(zxy) zxy.split('/').map(&:to_i) end
@@ -356,7 +371,6 @@ class ZXYTileServer < TileServer
 
   def move(zxy, dx, dy)
     z,x,y = split(zxy)
-
     join(z, x+dx, y+dy)
   end
 
@@ -383,7 +397,7 @@ end
 def create_tile_servers(default, *others)
   hash = {}
   [default, *others].each do |tile_server|
-    hash[tile_server.namespace] = tile_server
+    hash[tile_server.id] = tile_server
   end
   hash.default = default
   hash
@@ -430,7 +444,7 @@ def neighbours(center,w,h)
   return up, down, left, right
 end
 
-def calculateCenters(points, padding, page_setup)
+def calculate_centers(points, padding, page_setup)
   easting_limits = points.map { |ref| coords_for_ref(ref)[0] }.minmax
   northing_limits = points.map { |ref| coords_for_ref(ref)[1] }.minmax
   mid = ref_for_coords(easting_limits.reduce(:+) / 2.0, northing_limits.reduce(:+) / 2.0)
@@ -438,16 +452,16 @@ def calculateCenters(points, padding, page_setup)
   northing_range = (northing_limits[1] - northing_limits[0])/1000.0 + padding # km
   xcount = [0, (easting_range / page_setup.scaled_map_width(true)).floor].max
   ycount = [0, (northing_range / page_setup.scaled_map_height(true)).floor].max
-  min = offset_grid_ref(mid, - page_width * xcount / 2, - page_height * ycount / 2)
+  min = offset_grid_ref(mid, - page_setup.width * xcount / 2, - page_setup.height * ycount / 2)
 
   return (0..ycount).to_a.reverse.flat_map { |y|
     (0..xcount).map { |x|
-      offset_grid_ref(min, x*page_width, y*page_height)
+      offset_grid_ref(min, x*page_setup.width, y*page_setup.height)
     }
   }.join(','), xcount + 1, ycount + 1
 end
 
-def webHead(page_setup)
+def web_head(page_setup)
   <<HTML
   <html>
   <head>
@@ -455,121 +469,16 @@ def webHead(page_setup)
       Atlas: OS Maps for printing
     </title>
     <style>
-      body {
-        margin: 0;
-        display: flex;
-        flex-direction: row;
-        flex-wrap: wrap;
-        width: 100%;
-      }
-      .container {
-        margin: #{page_setup.easting_axis}cm #{page_setup.northing_axis}cm;
-        width: calc(100vw - #{2 * page_setup.map_margin_x}cm);
-        height: calc(100vh - #{2 * page_setup.map_margin_y}cm);
-        position: relative;
-        page-break-inside: avoid;
-      }
-      .printing .container {
-        width: #{page_setup.map_width}cm;
-        height: #{page_setup.map_height}cm;
-      }
-      @page {
-        margin: #{page_setup.page_margin}cm;
-        size: #{page_setup.paper_name};
-      }
-      .map {
-        overflow: hidden;
-        width: 100%;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      .map table {
-        border-collapse: collapse;
-      }
-      .map td { padding: 0; position: relative; }
-      .map img {
-        display: block;
-      }
-
-      .center .corner { position: absolute; }
-
-      .minimap {
-        position: absolute;
-        bottom: 100%;
-        left: 0;
-        border-collapse: collapse;
-      }
-
-      .minimap td {
-        padding: 0;
-        border: 0.2mm solid #999;
-        box-sizing: border-box;
-        background-color: white;
-        color-adjust: exact;
-      }
-
-      .minimap td.this {
-        background-color: #999;
-      }
-
-      .grid-letters {
-        position: absolute;
-        width: #{page_setup.northing_axis}cm;
-        height: #{page_setup.easting_axis}cm;
-      }
-      .grid-letters.top { bottom: 100%; }
-      .grid-letters.bottom { top: 100%; }
-      .grid-letters.left { right: 100%; }
-      .grid-letters.right { left: 100%; }
-
-      .border {
-        position: absolute;
-        overflow: hidden;
-      }
-      .border.vertical {
-        width: 100%;
-        height: #{page_setup.easting_axis}cm;
-      }
-      .border.vertical.pre { bottom: 100%; }
-      .border.vertical.post { top: 100%; }
-
-      .border.horizontal {
-        height: 100%;
-        width: #{page_setup.northing_axis}cm;
-      }
-      .border.horizontal.pre { right: 100%; }
-      .border.horizontal.post { left: 100%; }
-
-      .border .axis-label {
-        position: absolute;
-        top: 50%;
-        left: 50%;
-        color: DeepSkyBlue;
-        font-weight: bold;
-        width: 2cm;
-        height: 1cm;
-        margin: -0.5cm -1cm;
-        align-items: center;
-        display: flex;
-        justify-content: center;
-      }
-
-      .grid-line {
-        position: absolute;
-        z-index: 1;
-        border-left: 1px solid lightskyblue;
-      }
-      .grid-line.easting {
-        height: 200vh;
-        margin: -100vh -0.5px;
-      }
-      .grid-line.northing {
-        height: 200vw;
-        margin: -100vw -0.5px;
+      :root {
+        --page-margin: #{page_setup.page_margin}cm;
+        --page-width: #{page_setup.map_width}cm;
+        --page-height: #{page_setup.map_height}cm;
+        --easting-axis: #{page_setup.easting_axis}cm;
+        --northing-axis: #{page_setup.northing_axis}cm;
+        --page-size: #{page_setup.paper_name};
       }
     </style>
+    <link rel="stylesheet" href="atlas.css" />
     <script src="./atlas.js"></script>
   </head>
 HTML
@@ -583,7 +492,7 @@ def corner_label(center, dx, dy, page_setup)
   )
 end
 
-def webResponseSingle(center, tile_server, page_setup, minimap="")
+def web_response_single(center, tile_server, page_setup, minimap="")
   easting, northing = coords_for_ref(center)
   
   # normalize input 
@@ -591,6 +500,13 @@ def webResponseSingle(center, tile_server, page_setup, minimap="")
   centerTile = tile_server.from_os(easting, northing)
 
   scale_factor = tile_server.scale_factor_at(center)
+  
+  skip = case page_setup.scale
+    when 1.. then 1
+    when 0.5.. then 5
+    when 1.0/8.. then 10
+    else 20
+  end
 
   cell_pos_x, cell_pos_y = tile_server.proportion(centerTile, [easting, northing])
   
@@ -604,8 +520,8 @@ def webResponseSingle(center, tile_server, page_setup, minimap="")
 
   corner_of_center_square = -> (dx, dy) do
     tile_server.proportion(centerTile, [
-      easting.floor(-3) + dx * 1000,
-      northing.floor(-3) + dy * 1000,
+      ((easting / skip / 1000).floor + dx) * skip * 1000,
+      ((northing / skip / 1000).floor + dy) * skip * 1000,
     ])
   end
 
@@ -622,8 +538,12 @@ def webResponseSingle(center, tile_server, page_setup, minimap="")
       data-south="#{down}"
       data-west="#{left}"
       data-east="#{right}"
+      data-skip="#{skip}"
     >
       <style>
+        .container[data-center='#{center}'] {
+        }
+
         .container[data-center='#{center}'] table img {
           width: #{page_setup.scale*scale_factor}cm;
           height: #{page_setup.scale*scale_factor}cm;
@@ -644,9 +564,7 @@ def webResponseSingle(center, tile_server, page_setup, minimap="")
                  margin-bottom: #{-page_setup.scale*scale_factor*(1-cell_pos_y)}cm;
                  margin-left: #{-page_setup.scale*scale_factor*cell_pos_x}cm;
                  margin-right: #{-page_setup.scale*scale_factor*(1-cell_pos_x)}cm;
-                 #{tile_server.os_north ? "
-                   transform: rotate(#{true_north}rad);
-                 ":''}
+                 #{page_setup.os_north ? "transform: rotate(#{true_north}rad);":''}
                  transform-origin:
                   calc(50% + #{page_setup.scale*cell_pos_x}cm / 2 - #{page_setup.scale*(1-cell_pos_x)}cm / 2)
                   calc(50% + #{page_setup.scale*cell_pos_y}cm / 2 - #{page_setup.scale*(1-cell_pos_y)}cm / 2);"
@@ -681,7 +599,7 @@ END
           class='corner'
           style='left: #{cell_pos_x*100}%; top: #{cell_pos_y*100}%;'
         ></div>"
-        res << "<div class='grid-lines'></div>" if tile_server.grid_lines
+        res << "<div class='grid-lines'></div>" if page_setup.grid_lines
       end
       res << %Q(<img src="#{tile_server.proxy_to_tile(cell)}" alt="#{cell}">)
       res << "</td>"
@@ -718,30 +636,133 @@ def minimap(page_setup, i, xcount, ycount)
   minimap.string
 end
 
-def webResponse(centers, partial, tile_server, page_setup, xcount = 0, ycount = 0)
+def controls(chosen_tile_server, page_setup, raw_req)
+  Nokogiri::HTML::Builder.new do |doc|
+    input = ->(name, value = nil, type: :hidden, autocomplete: :off, **attrs) {
+      doc.input(type: type, name: name, autocomplete: autocomplete, value: value, **attrs,
+                **({disabled: true} if value.nil?))
+    }
+    option = -> (text, value, selected_value, **attrs) {
+      doc.option(text, value: value, **attrs, **({selected: true} if value == selected_value))
+    }
+
+    doc.div(class: 'controls') {
+      doc.div(class: 'print-controls') {
+        doc.button("Print", onclick: "window.print()", class: 'print-button')
+      }
+      doc.form(action: '/') {
+        doc.div(class: 'flex-together') {
+          doc.select(name: :style, autocomplete: :off) {
+            $tile_servers.values.each { |tile_server|
+              option[tile_server.title, tile_server.id, chosen_tile_server.id,
+                     'data-zooms': tile_server.zooms.to_a]
+            }
+          }
+          current_zoom = chosen_tile_server.zoom
+          doc.label(class: ['zoom-control', *([:hidden] if chosen_tile_server.zooms.size <= 1)].join(' ')) {
+            doc.span("Zoom")
+            input[:zoom, current_zoom, type: :number,
+                  min: chosen_tile_server.zooms.min || 0,
+                  max: chosen_tile_server.zooms.max || 0,
+                  style: 'width: 4em']
+          }
+        }
+        doc.label(class: 'scale-control') {
+          doc.span("Scale: ")
+          doc.div.range {
+            doc.div {
+              doc.input(type: :hidden, name: 'scale', value: page_setup.scale, autocomplete: :off)
+              doc.input(type: :range, value: Math::log2(page_setup.scale), min: -4, max: 4, step: 1, autocomplete: :off)
+            }
+            
+            doc.span{
+              doc.span("%g" % [1, page_setup.scale].max, id: 'scale-reading')
+              doc.text " cm : "
+              doc.span("%g" % [1, 1 / page_setup.scale].max, id: 'scale-reading-reciprocal')
+              doc.text " km" 
+            }
+          }
+        }
+        doc.div(class: 'flex-together') {
+          input_types = [:fit, :center]
+          selected_input_type = input_types.find { |key| raw_req[key] }
+          input = raw_req[selected_input_type]
+
+          input_types.each do |input_type|
+            doc.label {
+              doc.input(type: :radio, name: :input_type, value: input_type, autocomplete: :off,
+                        **({checked: true} if input_type == selected_input_type))
+              doc.span "#{input_type.to_s.capitalize} "
+              doc.input(type: :hidden, name: input_type, autocomplete: :off,
+                          **(input_type == selected_input_type ? {value: input} : {disabled: true}))
+              doc.input(**(input_type == selected_input_type ? {value: input, required: true} : {tabindex: -1}))
+            }
+          end
+        }
+        doc.div(class: 'flex-together') {
+          [[:os_north, 'Use grid north'], [:grid_lines, 'Overlay OS grid lines']].each { |(name, desc)|
+            doc.label {
+              doc.span(desc)
+              doc.select(name: name) {
+                [['Map default', ''], ['Yes', 'true'], ['No', 'false']].each { |(text, value)|
+                  option[text, value, raw_req[name] || '', autocomplete: :off]
+                }
+              }
+            }
+          }
+        }
+        doc.div(class: 'flex-together') {
+          doc.label {
+            doc.span "Paper size"
+            doc.select(name: :paper) {
+              $page_sizes.each { |id, (_,_,name)| option[name, id, $page_sizes.key(page_setup.paper)] }
+            }
+          }
+          doc.label {
+            doc.span "Margin (cm)"
+            doc.input(name: :margin, value: page_setup.page_margin,
+                      type: :number, min: 0, max: 10, step: 0.1,
+                      style: 'width: 4em')
+          }
+        }
+        doc.div {
+          doc.button("Go", type: :submit)
+        }
+      }
+    }
+  end.to_html
+end
+
+def web_response(centers, partial, tile_server, page_setup, raw_req, xcount = 0, ycount = 0)
   res = StringIO.new
   
   unless partial
     res << "<html>"
-    res << webHead(page_setup) unless partial
-    res << '<body class="printing">'
+    res << web_head(page_setup) unless partial
+    res << '<body>'
+    res << controls(tile_server, page_setup, raw_req)
   end
   centers.each_with_index do |center, i|
-    res << webResponseSingle(center, tile_server, page_setup, minimap(page_setup, i, xcount, ycount))
+    res << web_response_single(center, tile_server, page_setup, minimap(page_setup, i, xcount, ycount))
   end
   res << '</body></html>' unless partial
   res.string
 end
 
-config =
-  begin
-    YAML.load_file($config_file)
-  rescue
-    abort("Cannot find config file #{$config_file.inspect}, have you tried copying the sample one?")
+def parse_boolean(string, fallback)
+  case string
+  when /true/i then true
+  when /false/i then false
+  else fallback
   end
+end
 
-tile_servers = create_tile_servers(
-  *config.filter_map { |server|
+config = parse_config
+
+rc = YAML.load_file(config[:rc_file]) rescue abort("Cannot find config file #{$config_file.inspect}, have you tried copying the sample one?")
+
+$tile_servers = create_tile_servers(
+  *rc.filter_map { |server|
     server.transform_keys!(&:to_sym)
     server_type = {
       'zxy' => ZXYTileServer,
@@ -758,25 +779,26 @@ tile_servers = create_tile_servers(
 )
 
 if $stdout.isatty && ARGV[0]
-  terminal_response(ARGV.join(" "), tile_servers.default)
+  terminal_response(ARGV.join(" "), $tile_servers.default)
 else
   dev_stdout = WEBrick::Log.new(STDOUT, WEBrick::BasicLog::ERROR)
-  server = WEBrick::HTTPServer.new(BindAddress: $address, Port: $port, Logger: dev_stdout, AccessLog: [])
+  server = WEBrick::HTTPServer.new(BindAddress: config[:address], Port: config[:port], Logger: dev_stdout, AccessLog: [])
   trap 'TERM' do server.shutdown end
   trap 'INT' do server.shutdown end
 
   server.mount_proc '/' do |req, res|
     case req.path
     when %r"^/tile/([-\w]+)/(.+)$"
-      namespace = $1
+      id = $1
       tile = $2
-      tile_server = tile_servers[namespace]
+      tile_server = $tile_servers[id]
       folder = File.join(File.dirname(__FILE__), tile_server.folder)
 
       FileUtils.mkdir_p(folder)
       cache_path = File.join(folder, tile_server.path_to_tile(tile))
-      catch :errored do
+      catch :not_found do
         unless File.exist?(cache_path)
+          throw :not_found if config[:offline]
           #puts "Fetching #{tile}"
           puts "Fetching #{tile} from #{tile_server.url_to_tile(tile)}"
           begin
@@ -786,7 +808,7 @@ else
             puts "Unable to fetch #{tile} from #{tile_server.url_to_tile(tile)}, because #{e.inspect}."
             res.status = 404
             res.body = ''
-            throw :errored
+            throw :not_found
           end
         end
         res.header["Content-Type"] = tile_server.format
@@ -794,28 +816,34 @@ else
         res.header["Expires"] = "never"
         res.body = File.new(cache_path, "r")
       end
-    when '/atlas.js'
-      res.header["Content-Type"] = "text/javascript"
-      res.body = File.new('atlas.js', 'r')
+    when %r{^/(atlas\.js|atlas\.css)$}
+      file_name = $1
+      res.header["Content-Type"] = MIME::Types.of(file_name).first
+      res.body = File.new(file_name, 'r')
     when '/'
       centers = req.query['center']
       partial = req.query['partial']
-      tile_server = tile_servers[req.query['style']].with_zoom(req.query['zoom'])
+      tile_server = $tile_servers[req.query['style']].with_zoom(req.query['zoom'])
       paper = $page_sizes[req.query['paper']]
       margin = req.query['margin'] ? req.query['margin'].to_f : 0.5
-      scale = req.query['scale'] ? req.query['scale'].to_i : 4
+      scale = req.query['scale'] ? req.query['scale'].to_f : 4
       padding = req.query['padding'] ? req.query['padding'].to_f : 0
 
-      page_setup = PageSetup.new(paper, scale, margin)
+      os_north = parse_boolean(req.query['os_north'], tile_server.os_north)
+      grid_lines = parse_boolean(req.query['grid_lines'], tile_server.grid_lines)
 
-      xcount = 0
-      ycount = 0
+      page_setup = PageSetup.new(paper, scale, margin, os_north, grid_lines)
+
+      raw_req = req.query.transform_keys(&:to_sym)
       if req.query['fit']
-        centers, xcount, ycount = calculateCenters(req.query['fit'].split(','), padding, page_setup)
+        centers, xcount, ycount = calculate_centers(req.query['fit'].split(','), padding, page_setup)
+      else
+        xcount = 0
+        ycount = 0
       end
       if centers
         res.header['Content-Type'] = "text/html; charset=utf-8"
-        res.body = webResponse(centers.split(','), !!partial, tile_server, page_setup, xcount, ycount)
+        res.body = web_response(centers.split(','), !!partial, tile_server, page_setup, raw_req, xcount, ycount)
       else
         res.status = 400
         res.body = "No center given"
