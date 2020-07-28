@@ -14,13 +14,13 @@ Clone the file `atlasrc.yaml.sample` into `atlasrc.yaml`.
 
 Run the server
 ```
-./atlas
+./atlas.rb
 ```
 
 Or with live reloading for development, using [`entr`](http://eradman.com/entrproject/):
 
 ```
-ls ./atlas* | entr -r ./atlas
+ls ./atlas* | entr -r ./atlas.rb
 ```
 
 This can then be browsed at `http://localhost:5000/?center=NY%2017125%2012104`.
@@ -31,9 +31,9 @@ At the top of the page there are controls for specifying which map to display.
 
 ### Terminal usage
 
-`./atlas`: serve a web server, as detailed above.
+`./atlas.rb`: serve a web server, as detailed above.
 
-`./atlas TL123456`: display the map in a terminal, using [iTerm](https://www.iterm2.com)’s [image API](https://www.iterm2.com/documentation-images.html).
+`./atlas.rb TL123456`: display the map in a terminal, using [iTerm](https://www.iterm2.com)’s [image API](https://www.iterm2.com/documentation-images.html).
 
 The port can be set using the environment variable `ATLAS_PORT`, otherwise it will default to 5000. The address to serve to is given by `ATLAS_ADDRESS`, or defaults to `127.0.0.1` (localhost only). Use `0.0.0.0` to serve to everyone.
 
