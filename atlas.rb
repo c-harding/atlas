@@ -95,17 +95,18 @@ class NilClass
 end
 
 class TileServer
-  def initialize(id:, folder:, title: nil, grid_lines:, os_north:, zoom: nil, zooms: nil)
+  def initialize(id:, folder:, title: nil, grid_lines: false, os_north: false, zoom: nil, zooms: nil, scale: 0)
     @id = id
     @folder = folder
     @grid_lines = grid_lines
     @os_north = os_north
+    @scale = scale
     @title = title || id
     @zooms = zooms || (zoom.nil? ? 8..16 : [zoom])
     @zoom = closest_zoom(zoom || 14)
   end
 
-  attr_reader :id, :folder, :grid_lines, :os_north, :title, :zoom, :zooms
+  attr_reader :id, :folder, :grid_lines, :os_north, :title, :zoom, :zooms, :scale
 
   def proxy_to_tile(tile)
     "/tile/#{id}/#{tile}"
@@ -636,7 +637,7 @@ def controls(chosen_tile_server, page_setup, raw_req)
           doc.select(name: :style, autocomplete: :off) do
             $tile_servers.values.each do |tile_server|
               option[tile_server.title, tile_server.id, chosen_tile_server.id,
-                     'data-zooms': tile_server.zooms.to_a]
+                     'data-zooms': tile_server.zooms.to_a, 'data-scale': tile_server.scale]
             end
           end
           current_zoom = chosen_tile_server.zoom
@@ -664,19 +665,21 @@ def controls(chosen_tile_server, page_setup, raw_req)
             end
           end
         end
-        doc.div(class: 'flex-together') do
-          input_types = %i[fit center]
-          selected_input_type = input_types.find { |key| raw_req[key] }
-          input = raw_req[selected_input_type]
 
+        input_types = %i[fit center]
+        selected_input_type = input_types.find { |key| raw_req[key] }
+        position_input = raw_req[selected_input_type] || ''
+
+        doc.div(class: 'flex-together') do
           input_types.each do |input_type|
             doc.label do
-              doc.input(type: :radio, name: :input_type, value: input_type, autocomplete: :off,
-                        **({ checked: true } if input_type == selected_input_type))
+              input[:input_type, input_type,
+                    type: :radio, autocomplete: :off,
+                    **({ checked: true } if input_type == selected_input_type)]
               doc.span "#{input_type.to_s.capitalize} "
-              doc.input(type: :hidden, name: input_type, autocomplete: :off,
-                        **(input_type == selected_input_type ? { value: input } : { disabled: true }))
-              doc.input(**(input_type == selected_input_type ? { value: input, required: true } : { tabindex: -1 }))
+
+              input[input_type, (position_input if input_type == selected_input_type)]
+              doc.input(**(input_type == selected_input_type ? { value: position_input, required: true } : { tabindex: -1 }))
             end
           end
         end

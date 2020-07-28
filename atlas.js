@@ -255,6 +255,8 @@ window.addEventListener('DOMContentLoaded', () => {
     );
   };
 
+  const selectedElement = (select) => select.options[select.selectedIndex];
+
   addDescendantEventListener(
     form,
     'dblclick',
@@ -262,7 +264,8 @@ window.addEventListener('DOMContentLoaded', () => {
     function (e) {
       const zoomField = form.elements.zoom;
       const slider = form.querySelector('.scale-control input[type="range"]');
-      zoomField.value = +slider.value + 12;
+      const scale = selectedElement(form.elements.style).dataset.scale || 0;
+      zoomField.value = +slider.value + 12 + +scale;
     }
   );
 
@@ -273,7 +276,8 @@ window.addEventListener('DOMContentLoaded', () => {
     function (e) {
       const zoom = +form.elements.zoom.value;
       const slider = form.querySelector('.scale-control input[type="range"]');
-      slider.value = zoom - 12;
+      const scale = selectedElement(form.elements.style).dataset.scale || 0;
+      slider.value = zoom - 12 - +scale;
       onRangeChange(slider);
     }
   );
