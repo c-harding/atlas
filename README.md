@@ -8,7 +8,8 @@ For best results, view in Firefox.
 
 ## Usage
 
-Atlas is written in Ruby 2.7, so you will need to install it if you haven’t already. If you get a `GemNotFoundException`, then `gem install` any missing dependencies.
+Atlas is written in Ruby 2.7, so you will need to install it if you haven’t already.
+Use `bundle install` to install the dependencies.
 
 Clone the file `atlasrc.yaml.sample` into `atlasrc.yaml`.
 
