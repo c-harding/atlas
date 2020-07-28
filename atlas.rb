@@ -809,7 +809,7 @@ else
       res.header['Content-Type'] = MIME::Types.of(file_name).first
       res.body = File.new(file_name, 'r')
     when '/'
-      centers = req.query['center']
+      centers = req.query['center'] || ''
       partial = req.query['partial']
       tile_server = $tile_servers[req.query['style']].with_zoom(req.query['zoom'])
       paper = PAPER_SIZES[req.query['paper']]
@@ -830,13 +830,9 @@ else
         xcount = 0
         ycount = 0
       end
-      if centers
-        res.header['Content-Type'] = 'text/html; charset=utf-8'
-        res.body = web_response(centers.split(','), !!partial, tile_server, page_setup, raw_req, xcount, ycount)
-      else
-        res.status = 400
-        res.body = 'No center given'
-      end
+      res.header['Content-Type'] = 'text/html; charset=utf-8'
+      res.status = 400 if centers.empty?
+      res.body = web_response(centers.split(','), !!partial, tile_server, page_setup, raw_req, xcount, ycount)
     else
       res.status = 400
       res.body = 'Bad URL'
