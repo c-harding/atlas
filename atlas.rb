@@ -1,6 +1,5 @@
 #!/usr/bin/env ruby
 
-require 'os_map_ref'
 require 'osgb_convert'
 require 'quadkey'
 require 'webrick'
@@ -12,7 +11,8 @@ require 'yaml'
 require 'mime/types'
 require 'nokogiri'
 require 'attr_extras'
-require_relative 'lib/dimensions'
+require_relative 'lib/pair'
+require_relative 'lib/os'
 
 def hash_by(*entries, default: nil, field: :id)
   hash = {}
@@ -63,7 +63,7 @@ PageSetup = Struct.new(:paper, :scale, :page_margin, :os_north, :grid_lines) do
   attr_reader :axis
 
   def inner
-    paper - 2 * page_margin
+    paper - page_margin * 2
   end
 
   def map
@@ -80,6 +80,47 @@ PageSetup = Struct.new(:paper, :scale, :page_margin, :os_north, :grid_lines) do
 
   def scaled_safe_map
     safe_map / scale
+  end
+end
+
+class CoordinateSystem
+end
+
+class OSGrid < CoordinateSystem
+  def ll_to_en(ll)
+    latlong = OsgbConvert::WGS84.new(ll.lat, ll.long, 0)
+    grid = OsgbConvert::OSGrid.from_wgs84(latlong)
+    Pair[grid.easting, grid.northing].round
+  end
+
+  def en_to_ll(easting, northing)
+    grid = OsgbConvert::OSGrid.new(easting, northing)
+    latlong = grid.wgs84
+    LongLat[latlong]
+  end
+
+  def from_ll(ll)
+    easting, northing = ll_to_en(ll)
+    OSRef.to_ref(easting, northing)
+  end
+
+  def to_ll(osref)
+    easting, northing = OSRef.parse_ref(osref)
+    en_to_ll(easting, northing)
+  end
+
+  # Find the coordinates of a certain corner of the grid square of size skip meters
+  # ```
+  # (0,1)---------(1,1)
+  #   |             |
+  #   |             |
+  #   |  x <-point  |
+  #   |             |
+  # (0,0)---------(1,0)
+  # ```
+  def corner(ll, dx = 0, dy = 0, skip = 1000)
+    coords = (ll_to_en(ll) / skip).floor * skip
+    en_to_ll(* coords + Pair[dx, dy] * skip)
   end
 end
 
@@ -112,56 +153,31 @@ class TileServer
     "/tile/#{id}/#{tile}"
   end
 
-  def from_os(easting, northing)
-    latitude, longitude = latlong_deg_from_coords(easting, northing)
-    from_ll(latitude, longitude)
-  end
-
-  def to_os(tile)
-    latitude, longitude = to_ll(tile)
-    coords_from_latlong_deg(latitude, longitude)
-  end
-
-  def coords_from_latlong_deg(lat, _long)
-    latlong = OsgbConvert::WGS84.new(lat, lon, 0)
-    grid = OsgbConvert::OSGrid.from_wgs84(latlong)
-    [grid.easting, grid.northing]
-  end
-
-  def latlong_deg_from_coords(easting, northing)
-    grid = OsgbConvert::OSGrid.new(easting, northing)
-    latlong = grid.wgs84
-    [latlong.lat, latlong.long]
-  end
-
-  # number of kilometers per tile horizontally
+  # number of kilometers per tile each way
+  # @param center [LongLat]
   def scale_factor_at(center)
-    easting, northing = coords_for_ref(center)
-    tile = from_os(easting, northing)
+    tile = from_ll(center)
 
-    square_left = latlong_deg_from_coords(easting.floor(-3), northing)
-    square_right = latlong_deg_from_coords(easting.floor(-3) + 1000, northing)
+    square_left = center
+    square_right = center.move(1000, 0)
+
     tile_left = to_ll(tile)
     tile_right = to_ll(move(tile, 1, 0))
 
-    pythagoras(distance(tile_left, tile_right)[0..1]) / pythagoras(distance(square_left, square_right))
+    tile_left.distance_to(tile_right) / square_left.distance_to(square_right)
   end
 
-  def proportion(tile, (easting, northing))
-    tl_latitude, tl_longitude = to_ll(tile)
-    br_latitude, br_longitude = to_ll(move(tile, 1, 1))
+  def proportion(tile, point)
+    top_left = to_ll(tile)
+    top_right = to_ll(move(tile, 1, 0))
+    bottom_left = to_ll(move(tile, 0, 1))
 
-    latitude, longitude = latlong_deg_from_coords(easting, northing)
+    right = top_right - top_left
+    down = bottom_left - top_left
 
-    [(longitude - tl_longitude) / (br_longitude - tl_longitude), (latitude - tl_latitude) / (br_latitude - tl_latitude)]
-  end
+    to_point = point - top_left
 
-  def distance(p1, p2)
-    p1.zip(p2).map { |(a, b)| a - b }
-  end
-
-  def pythagoras(as)
-    as.map { |a| a**2 }.reduce(:+)**0.5
+    to_point.as_linear_combination(right, down)
   end
 
   def closest_zoom(zoom)
@@ -189,6 +205,7 @@ class TileServer
     end
   end
 end
+
 class QuadkeyTileServer < TileServer
   def initialize(url:, **rest)
     super(**rest)
@@ -244,12 +261,13 @@ class QuadkeyTileServer < TileServer
     q
   end
 
-  def from_ll(lat, long)
-    Quadkey.encode(lat, long, @zoom)
+  def from_ll(ll)
+    Quadkey.encode(ll.lat, ll.long, @zoom)
   end
 
   def to_ll(q)
-    Quadkey.decode(q)
+    lat, long = Quadkey.decode(q)
+    LongLat[long, lat]
   end
 end
 
@@ -261,22 +279,18 @@ class StreetMapTileServer < TileServer
     @mime = 'image/gif'
     @extension = 'gif'
     @tile_size = tile_size
-    # @fetch_queue = Buffer.new(4, 0.1)
+
+    @coordinate_system = OSGrid.new
   end
 
   attr_reader :mime, :lookup_url, :tile_size
 
   def joiner
-    '-'
+    '_'
   end
 
   def new_with_zoom(_zoom)
     self
-  end
-
-  def fetch(smref)
-    @fetch_queue.update { |queue| queue + [smref] }
-    sleep
   end
 
   def path_to_tile(smref)
@@ -303,16 +317,6 @@ class StreetMapTileServer < TileServer
     )
   end
 
-  def proportion(smref, (easting, northing))
-    bl_easting, bl_northing = to_os(smref)
-    tr_easting, tr_northing = to_os(move(smref, 1, -1))
-    [
-      (easting.to_f - bl_easting) / (tr_easting.to_f - bl_easting),
-      # negated because the coordinate system is reversed: low y is south
-      1 - (northing.to_f - bl_northing) / (tr_northing.to_f - bl_northing)
-    ]
-  end
-
   def scale_factor_at(_center)
     tile_size / 1000.0
   end
@@ -323,6 +327,14 @@ class StreetMapTileServer < TileServer
 
   def to_os(smref)
     smref.split(joiner).map(&:to_i)
+  end
+
+  def from_ll(ll)
+    from_os(*@coordinate_system.ll_to_en(ll))
+  end
+
+  def to_ll(smref)
+    @coordinate_system.en_to_ll(*to_os(smref))
   end
 end
 
@@ -364,11 +376,11 @@ class ZXYTileServer < TileServer
     join(z, x + dx, y + dy)
   end
 
-  def from_ll(lat, long)
+  def from_ll(ll)
     z = @zoom
-    lat_rad = lat / 180 * Math::PI
+    lat_rad = ll.lat / 180 * Math::PI
     n = 2.0**z
-    x = ((long + 180.0) / 360.0 * n).to_i
+    x = ((ll.long + 180.0) / 360.0 * n).to_i
     y = ((1.0 - Math.log(Math.tan(lat_rad) + (1 / Math.cos(lat_rad))) / Math::PI) / 2.0 * n).to_i
     join(z, x, y)
   end
@@ -380,13 +392,13 @@ class ZXYTileServer < TileServer
     long = x / n * 360.0 - 180.0
     lat_rad = Math.atan(Math.sinh(Math::PI * (1 - 2 * y / n)))
     lat = 180.0 * (lat_rad / Math::PI)
-    [lat, long]
+    LongLat[long, lat]
   end
 end
 
 def terminal_response(center, tile_server)
   Dir.chdir(File.dirname(__FILE__))
-  center_tile = tile_server.from_os(*coords_for_ref(center))
+  center_tile = tile_server.from_os(*OSRef.parse_ref(center))
   (-$h..$h).each do |y|
     line = (-$w..$w).map do |x|
       tile_server.move(center_tile, x, y)
@@ -395,41 +407,20 @@ def terminal_response(center, tile_server)
   end
 end
 
-def ref_for_coords(easting, northing)
-  OsMapRef::Location.for([
-    '%06d' % easting,
-    '%06d' % northing
-  ].join(',')).map_reference
-end
-
-def coords_for_ref(center)
-  ref = OsMapRef::Location.for(center)
-  [ref.easting.to_i, ref.northing.to_i]
-end
-
-# in kilometers
-def offset_grid_ref(center, dx, dy)
-  easting, northing = coords_for_ref(center)
-  ref_for_coords(
-    easting + (1000 * dx),
-    northing + (1000 * dy)
-  )
-end
-
 def neighbours(center, w, h)
-  up = offset_grid_ref(center, 0, h)
-  down = offset_grid_ref(center, 0, -h)
-  left = offset_grid_ref(center, -w, 0)
-  right = offset_grid_ref(center, w, 0)
+  up = center.move(0, h)
+  down = center.move(0, -h)
+  left = center.move(-w, 0)
+  right = center.move(w, 0)
 
   [up, down, left, right]
 end
 
 def calculate_centers(points, padding, page_setup)
-  easting_limits = points.map { |ref| coords_for_ref(ref)[0] }.minmax
-  northing_limits = points.map { |ref| coords_for_ref(ref)[1] }.minmax
-  mid = ref_for_coords(easting_limits.reduce(:+) / 2.0, northing_limits.reduce(:+) / 2.0)
-  range = Dimensions[
+  easting_limits = points.map { |ref| OSRef.parse_ref(ref)[0] }.minmax
+  northing_limits = points.map { |ref| OSRef.parse_ref(ref)[1] }.minmax
+  mid = OSRef.to_ref(easting_limits.reduce(:+) / 2.0, northing_limits.reduce(:+) / 2.0)
+  range = Pair[
     easting_limits[1] - easting_limits[0], # (m)
     northing_limits[1] - northing_limits[0], # (m)
   ] / 1000.0 + padding # (km)
@@ -452,12 +443,15 @@ def web_head(page_setup)
       </title>
       <style>
         :root {
-          --page-margin: #{page_setup.page_margin}cm;
           --page-width: #{page_setup.map.width}cm;
           --page-height: #{page_setup.map.height}cm;
           --easting-axis: #{page_setup.axis.height}cm;
-          --northing-axis: #{page_setup.axis.height}cm;
-          --page-size: #{page_setup.paper.name};
+          --northing-axis: #{page_setup.axis.width}cm;
+        }
+
+        @page {
+          margin: #{page_setup.page_margin}cm;
+          size: #{page_setup.paper.name};
         }
       </style>
       <link rel="stylesheet" href="atlas.css" />
@@ -467,18 +461,13 @@ def web_head(page_setup)
 end
 
 def corner_label(center, dx, dy, page_setup)
-  offset_grid_ref(
-    center,
-    * page_setup.scaled_map * [dx, dy] / 2
-  )
+  # TODO: where the coordinate system comes from
+  corner = center.move(* page_setup.scaled_map * [dx, dy] * 1000 / 2)
+  OSGrid.new.from_ll(corner)
 end
 
 def web_response_single(center, tile_server, page_setup, minimap = '')
-  easting, northing = coords_for_ref(center)
-
-  # normalize input
-  center = ref_for_coords(easting, northing)
-  centerTile = tile_server.from_os(easting, northing)
+  centerTile = tile_server.from_ll(center)
 
   scale_factor = tile_server.scale_factor_at(center)
 
@@ -489,50 +478,51 @@ def web_response_single(center, tile_server, page_setup, minimap = '')
          else 20
          end
 
-  cell_pos_x, cell_pos_y = tile_server.proportion(centerTile, [easting, northing])
+  pos_in_cell = tile_server.proportion(centerTile, center)
 
   res = StringIO.new
 
   up, down, left, right = neighbours(
     center,
-    *page_setup.scaled_safe_map
+    *page_setup.scaled_safe_map * 1000 # in meters
   )
 
+  # Get the position of a certain corner of the center grid square, as a proportion of the center tile
+  # (dx, dy):
+  # (0,1)--(1,1)
+  #   |      |
+  # (0,0)--(1,0)
+  # TODO: what are tiles? I’ll hardcode OS for now
+  coordinate_system = OSGrid.new
   corner_of_center_square = lambda do |dx, dy|
-    tile_server.proportion(centerTile, [
-                             ((easting / skip / 1000).floor + dx) * skip * 1000,
-                             ((northing / skip / 1000).floor + dy) * skip * 1000
-                           ])
+    tile_server.proportion(centerTile, coordinate_system.corner(center, dx, dy, skip * 1000))
   end
 
-  cell_side = corner_of_center_square[0, 0].zip(corner_of_center_square[0, 1]).map { |(a, b)| a - b }
-  true_north = Math.atan2(*cell_side)
+  cell_side = corner_of_center_square[0, 0] - corner_of_center_square[0, 1]
+  true_north = cell_side.angle_from_vertical
 
   res << %(
     <div class="page"
-      data-center="#{center}"
-      data-easting="#{easting}"
-      data-northing="#{northing}"
-      data-north="#{up}"
-      data-south="#{down}"
-      data-west="#{left}"
-      data-east="#{right}"
+      data-center="#{coordinate_system.from_ll(center)}"
+      data-easting="#{coordinate_system.ll_to_en(center).x}"
+      data-northing="#{coordinate_system.ll_to_en(center).y}"
+      data-north="#{coordinate_system.from_ll(up)}"
+      data-south="#{coordinate_system.from_ll(down)}"
+      data-west="#{coordinate_system.from_ll(left)}"
+      data-east="#{coordinate_system.from_ll(right)}"
       data-skip="#{skip}"
     >
       <div class="map-frame">
         <style>
-          .page[data-center='#{center}'] {
-          }
-
-          .page[data-center='#{center}'] table img {
+          .page[data-center='#{coordinate_system.from_ll(center)}'] table img {
             width: #{page_setup.scale * scale_factor}cm;
             height: #{page_setup.scale * scale_factor}cm;
           }
         </style>
-        <div class="grid-letters top left">#{corner_label(center, -1, 1, page_setup)[0..2]}</div>
-        <div class="grid-letters bottom left">#{corner_label(center, -1, -1, page_setup)[0..2]}</div>
-        <div class="grid-letters top right">#{corner_label(center, 1, 1, page_setup)[0..2]}</div>
-        <div class="grid-letters bottom right">#{corner_label(center, 1, -1, page_setup)[0..2]}</div>
+        <div class="grid-letters top left">#{corner_label(center, -1, 1, page_setup)[0...2]}</div>
+        <div class="grid-letters bottom left">#{corner_label(center, -1, -1, page_setup)[0...2]}</div>
+        <div class="grid-letters top right">#{corner_label(center, 1, 1, page_setup)[0...2]}</div>
+        <div class="grid-letters bottom right">#{corner_label(center, 1, -1, page_setup)[0...2]}</div>
         <div class="border vertical pre"></div>
         <div class="border vertical post"></div>
         <div class="border horizontal pre"></div>
@@ -540,26 +530,26 @@ def web_response_single(center, tile_server, page_setup, minimap = '')
         #{minimap}
         <div class='map'>
           <table
-            style="margin-top: #{-page_setup.scale * scale_factor * cell_pos_y}cm;
-                    margin-bottom: #{-page_setup.scale * scale_factor * (1 - cell_pos_y)}cm;
-                    margin-left: #{-page_setup.scale * scale_factor * cell_pos_x}cm;
-                    margin-right: #{-page_setup.scale * scale_factor * (1 - cell_pos_x)}cm;
+            style="margin-top: #{-page_setup.scale * scale_factor * pos_in_cell.y}cm;
+                    margin-bottom: #{-page_setup.scale * scale_factor * (1 - pos_in_cell.y)}cm;
+                    margin-left: #{-page_setup.scale * scale_factor * pos_in_cell.x}cm;
+                    margin-right: #{-page_setup.scale * scale_factor * (1 - pos_in_cell.x)}cm;
                     #{page_setup.os_north ? "transform: rotate(#{true_north}rad);" : ''}
                     transform-origin:
-                    calc(50% + #{page_setup.scale * cell_pos_x}cm / 2 - #{page_setup.scale * (1 - cell_pos_x)}cm / 2)
-                    calc(50% + #{page_setup.scale * cell_pos_y}cm / 2 - #{page_setup.scale * (1 - cell_pos_y)}cm / 2);"
+                      calc(50% + #{page_setup.scale * pos_in_cell.x}cm / 2 - #{page_setup.scale * (1 - pos_in_cell.x)}cm / 2)
+                      calc(50% + #{page_setup.scale * pos_in_cell.y}cm / 2 - #{page_setup.scale * (1 - pos_in_cell.y)}cm / 2);"
           >
   )
-  tile_grid = (page_setup.scaled_map / 2.0 / scale_factor).ceil + 1
+  tile_grid = (page_setup.scaled_map / 2.0 / scale_factor).ceil
   (-tile_grid.height..tile_grid.height).each do |y|
     res << '<tr>'
     (-tile_grid.width..tile_grid.width).each do |x|
       cell = tile_server.move(centerTile, x, y)
-      center = y == 0 && x == 0
+      is_center = y == 0 && x == 0
       res << '<td '
-      res << "class='center'" if center
+      res << "class='center'" if is_center
       res << '>'
-      if center
+      if is_center
         %w[bottom top].each_with_index do |vertical, y|
           %w[left right].each_with_index do |horizontal, x|
             left, top = corner_of_center_square[x, y]
@@ -575,7 +565,7 @@ def web_response_single(center, tile_server, page_setup, minimap = '')
         end
         res << "<div
             class='corner'
-            style='left: #{cell_pos_x * 100}%; top: #{cell_pos_y * 100}%;'
+            style='left: #{pos_in_cell.x * 100}%; top: #{pos_in_cell.y * 100}%;'
           ></div>"
         res << "<div class='grid-lines'></div>" if page_setup.grid_lines
       end
@@ -620,7 +610,7 @@ end
 
 def controls(chosen_tile_server, page_setup, raw_req)
   Nokogiri::HTML::Builder.new do |doc|
-    input = lambda { |name, value = nil, type: :hidden, autocomplete: :off, **attrs|
+    input = lambda { |name, value, type: :hidden, autocomplete: :off, **attrs|
       doc.input(type: type, name: name, autocomplete: autocomplete, value: value, **attrs,
                 **({ disabled: true } if value.nil?))
     }
@@ -641,12 +631,24 @@ def controls(chosen_tile_server, page_setup, raw_req)
             end
           end
           current_zoom = chosen_tile_server.zoom
-          doc.label(class: ['zoom-control', *([:hidden] if chosen_tile_server.zooms.size <= 1)].join(' ')) do
+          increments = chosen_tile_server.zooms.each_cons(2).map { |a, b| b - a }.to_a.uniq
+          equal_increments = increments.size <= 1
+          doc.label(class: ['zoom-control',
+                            *([:invisible] if chosen_tile_server.zooms.size <= 1)].join(' ')) do
             doc.span('Zoom')
             input[:zoom, current_zoom, type: :number,
                                        min: chosen_tile_server.zooms.min || 0,
                                        max: chosen_tile_server.zooms.max || 0,
+                                       **({ step: increments.first } if equal_increments),
+                                       **({ disabled: true, class: :hidden } unless equal_increments),
                                        style: 'width: 4em']
+            doc.select(class: ['zoom-dropdown', *([:hidden] if equal_increments)].join(' '),
+                       autocomplete: :off,
+                       style: 'width: 4em') do
+              chosen_tile_server.zooms.each do |zoom|
+                option[zoom, zoom, current_zoom]
+              end
+            end
           end
         end
         doc.label(class: 'scale-control') do
@@ -682,6 +684,11 @@ def controls(chosen_tile_server, page_setup, raw_req)
               doc.input(**(input_type == selected_input_type ? { value: position_input, required: true } : { tabindex: -1 }))
             end
           end
+        end
+        doc.div do
+          doc.textarea(position_input.gsub(',', "\n"),
+                       rows: 3, cols: 16,
+                       pattern: '([A-Z]{2}\s*(\d{2}\s*\d{2}|\d{3}\s*\d{3}|\d{4}\s*\d{4}|\d{5}\s*\d{5})(\n|$))+')
         end
         doc.div(class: 'flex-together') do
           [[:os_north, 'Use grid north'], [:grid_lines, 'Overlay OS grid lines']].each do |(name, desc)|
@@ -809,7 +816,6 @@ else
       res.header['Content-Type'] = MIME::Types.of(file_name).first
       res.body = File.new(file_name, 'r')
     when '/'
-      centers = req.query['center'] || ''
       partial = req.query['partial']
       tile_server = $tile_servers[req.query['style']].with_zoom(req.query['zoom'])
       paper = PAPER_SIZES[req.query['paper']]
@@ -818,6 +824,8 @@ else
       scale = req.query['scale'] ? req.query['scale'].to_f : 4
       padding = req.query['padding'] ? req.query['padding'].to_f : 0
 
+      coordinate_system = OSGrid.new
+
       os_north = parse_boolean(req.query['os_north'], tile_server.os_north)
       grid_lines = parse_boolean(req.query['grid_lines'], tile_server.grid_lines)
 
@@ -825,14 +833,18 @@ else
 
       raw_req = req.query.transform_keys(&:to_sym)
       if req.query['fit']
-        centers, xcount, ycount = calculate_centers(req.query['fit'].split(','), padding, page_setup)
-      else
+        fit_points = req.query['fit'].split(',').map(&coordinate_system.method(:to_ll))
+        centers, xcount, ycount = calculate_centers(fit_points, padding, page_setup)
+      elsif req.query['center']
+        centers = req.query['center'].split(',').map(&coordinate_system.method(:to_ll))
         xcount = 0
         ycount = 0
+      else
+        res.status = 400
+        centers = []
       end
       res.header['Content-Type'] = 'text/html; charset=utf-8'
-      res.status = 400 if centers.empty?
-      res.body = web_response(centers.split(','), !!partial, tile_server, page_setup, raw_req, xcount, ycount)
+      res.body = web_response(centers, !!partial, tile_server, page_setup, raw_req, xcount, ycount)
     else
       res.status = 400
       res.body = 'Bad URL'

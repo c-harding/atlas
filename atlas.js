@@ -65,11 +65,23 @@ const addGridLines = (
   }
 };
 
+const mod = (x, n) => ((x % n) + n) % n;
+
+const makeElement = (type, string = '', attrs = {}) => {
+  const elem = document.createElement(type);
+  if (string) elem.innerText = string;
+  Object.assign(elem, attrs);
+  return elem;
+};
+
 const makeLabel = (number, style) => {
   const label = document.createElement('div');
   label.classList.add('axis-label');
-  label.innerText = ('' + number).slice(-2);
   Object.assign(label.style, style);
+  const span = label.appendChild(
+    makeElement('span', ('' + mod(number, 100)).padStart(2, '0'))
+  );
+  if (mod(number, 100) === 0) span.prepend(makeElement('sup', number / 100));
   return label;
 };
 
@@ -105,6 +117,11 @@ const addDimensionTicks = (
     const nextTickIntersect = getIntersect(bounds, nextLine);
     const axisLength = bounds[axisSize];
     const tickSep = nextTickIntersect - baseTickIntersect;
+
+    if (tickSep == 0) {
+      addAxisTick(element, baseCoordinate, offsetProperty, baseTickIntersect);
+      continue;
+    }
 
     for (
       let intersect = baseTickIntersect, coordinate = baseCoordinate;
@@ -261,13 +278,20 @@ window.addEventListener('DOMContentLoaded', () => {
     form,
     'dblclick',
     '.zoom-control > span',
-    function (e) {
+    function () {
       const zoomField = form.elements.zoom;
       const slider = form.querySelector('.scale-control input[type="range"]');
       const scale = selectedElement(form.elements.style).dataset.scale || 0;
       zoomField.value = +slider.value + 12 + +scale;
+      // TODO: round to nearest
     }
   );
+
+  addDescendantEventListener(form, 'change', '.zoom-dropdown', function () {
+    const zoomField = form.elements.zoom;
+    const zoomDropdown = this;
+    zoomField.value = this.value;
+  });
 
   addDescendantEventListener(
     form,
@@ -295,14 +319,38 @@ window.addEventListener('DOMContentLoaded', () => {
     const option = this.selectedOptions[0];
     const zooms = option ? JSON.parse(option.dataset.zooms) : [];
     const zoomField = form.querySelector('.zoom-control');
+    const zoomDropdown = form.querySelector('.zoom-dropdown');
     const input = zoomField.querySelector('input');
     const choiceOfZoom = zooms.length > 1;
-    zoomField.classList.toggle('hidden', !choiceOfZoom);
+    const zoomIncrements = new Set(
+      (function* (array) {
+        for (let i = 0; i < array.length - 1; i++)
+          yield array[i + 1] - array[i];
+      })(zooms)
+    );
+    zoomField.classList.toggle('invisible', !choiceOfZoom);
     input.disabled = !choiceOfZoom;
     input.min = Math.min(...zooms);
     input.max = Math.max(...zooms);
     if (+input.value < +input.min) input.value = input.min;
     else if (+input.value > +input.max) input.value = input.max;
+    if (zoomIncrements.size <= 1) {
+      input.step = zoomIncrements.values().next().value;
+      input.classList.remove('hidden');
+      zoomDropdown.classList.add('hidden');
+    } else {
+      input.classList.add('hidden');
+      zoomDropdown.classList.remove('hidden');
+      zoomDropdown.innerText = '';
+      for (const zoom of zooms) {
+        zoomDropdown.appendChild(
+          makeElement('option', zoom, {
+            value: zoom,
+            selected: input.value == zoom,
+          })
+        );
+      }
+    }
   });
 
   form.addEventListener('submit', (e) => {

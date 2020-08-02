@@ -17,11 +17,6 @@ body {
   page-break-inside: avoid;
 }
 
-@page {
-  margin: var(--page-margin);
-  size: var(--page-size);
-}
-
 .map {
   overflow: hidden;
   width: 100%;
@@ -136,6 +131,11 @@ body {
   justify-content: center;
 }
 
+.axis-label sup {
+  font-size: 0.6em;
+  vertical-align: text-top;
+}
+
 .grid-line {
   position: absolute;
   z-index: 1;
@@ -174,6 +174,10 @@ body {
   flex-wrap: wrap;
 }
 
+textarea {
+  resize: vertical;
+}
+
 .flex-together>label {
   display: flex;
   flex-direction: row;
@@ -197,6 +201,10 @@ body {
 }
 
 .hidden {
+  display: none;
+}
+
+.invisible {
   visibility: hidden;
 }
 
