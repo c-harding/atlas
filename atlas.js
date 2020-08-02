@@ -69,27 +69,39 @@ const mod = (x, n) => ((x % n) + n) % n;
 
 const makeElement = (type, string = '', attrs = {}) => {
   const elem = document.createElement(type);
-  if (string) elem.innerText = string;
+  if (string !== '') elem.innerText = string;
   Object.assign(elem, attrs);
   return elem;
 };
 
-const makeLabel = (number, style) => {
+const makeLabel = (number, style, limit = false) => {
   const label = document.createElement('div');
   label.classList.add('axis-label');
   Object.assign(label.style, style);
   const span = label.appendChild(
     makeElement('span', ('' + mod(number, 100)).padStart(2, '0'))
   );
-  if (mod(number, 100) === 0) span.prepend(makeElement('sup', number / 100));
+  if (mod(number, 100) === 0 || limit) {
+    span.prepend(makeElement('sup', Math.floor(number / 100)));
+  }
   return label;
 };
 
-const addAxisTick = (element, labelText, offsetProperty, offsetValue) => {
+const addAxisTick = (
+  element,
+  labelText,
+  offsetProperty,
+  offsetValue,
+  limit = false
+) => {
   element.appendChild(
-    makeLabel(labelText, {
-      [offsetProperty]: offsetValue + 'px',
-    })
+    makeLabel(
+      labelText,
+      {
+        [offsetProperty]: offsetValue + 'px',
+      },
+      limit
+    )
   );
 };
 
@@ -128,7 +140,16 @@ const addDimensionTicks = (
       0 <= intersect && intersect <= axisLength;
       intersect -= tickSep, coordinate -= skip
     ) {
-      addAxisTick(element, coordinate, offsetProperty, intersect);
+      const withinLimit = 0 <= intersect && intersect <= axisLength - 20;
+      const nextWithinLimit =
+        0 <= intersect - tickSep && intersect - tickSep <= axisLength - 20;
+      addAxisTick(
+        element,
+        coordinate,
+        offsetProperty,
+        intersect,
+        withinLimit && !nextWithinLimit
+      );
       if (coordinate < minCoord) minCoord = coordinate;
     }
     for (
@@ -136,7 +157,16 @@ const addDimensionTicks = (
       0 <= intersect && intersect <= axisLength;
       intersect += tickSep, coordinate += skip
     ) {
-      addAxisTick(element, coordinate, offsetProperty, intersect);
+      const withinLimit = 0 <= intersect && intersect <= axisLength - 20;
+      const nextWithinLimit =
+        0 <= intersect + tickSep && intersect + tickSep <= axisLength - 20;
+      addAxisTick(
+        element,
+        coordinate,
+        offsetProperty,
+        intersect,
+        withinLimit && !nextWithinLimit
+      );
       if (coordinate > maxCoord) maxCoord = coordinate;
     }
   }

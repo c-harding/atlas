@@ -4,18 +4,18 @@
   folder: 'bing'
   title: "Bing Maps"
   grid_lines: true
-  os_north: true
+  grid_north: true
 - type: zxy
   url: "https://{a|b|c}.tile.opentopomap.org/{z}/{x}/{y}.png"
   id: 'topo'
   folder: 'topo'
   title: 'OpenTopoMap'
   grid_lines: true
-  os_north: false
+  grid_north: false
 - type: zxy
   url: "http://{a|b}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png"
   id: 'fr'
   folder: 'fr'
   title: 'OSM.fr'
   grid_lines: true
-  os_north: true
+  grid_north: true

@@ -55,7 +55,7 @@ If `ATLAS_OFFLINE` is nonempty, no tiles will be fetched, and only the tiles alr
 | `padding` | 0 | Include a minimum of `padding` kilometres around each of the provided points in `fit`. This has no effect if `fit` is not given. |
 | `partial` |  | If present, do not serve the `<head>`, only the new container. This allows AJAX requests for more maps, via the `addMap()` function. |
 | `grid_lines` | Whether or not to superimpose OS grid lines over the map (`true` or `false`, otherwise defaults to the value given in the tileserver config). |
-| `os_north` | Whether or not to rotate the map such that OS grid lines run exactly vertically (`true` or `false`, otherwise defaults to the value given in the tileserver config). |
+| `grid_north` | Whether or not to rotate the map such that OS grid lines run exactly vertically (`true` or `false`, otherwise defaults to the value given in the tileserver config). |
 
 ### `atlasrc.yaml` config
 
@@ -71,7 +71,7 @@ This file contains an array of objects, each specifying a tile server source.
 | `zoom` | The default zoom level to request the tiles at. Defaults to 14. If `zooms` is specified and `zoom` does not fall within it, the nearest value in `zooms` is taken. |
 | `zooms` | An array or range (e.g. `!ruby/range 12..16`) of valid zoom levels. Defaults to `8..16`. |
 | `grid_lines` | Whether or not to superimpose OS grid lines over the map, by default. |
-| `os_north` | Whether or not to rotate the map such that OS grid lines run exactly vertically, by default. |
+| `grid_north` | Whether or not to rotate the map such that OS grid lines run exactly vertically, by default. |
 
 ## Sample
 

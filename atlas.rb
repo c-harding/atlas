@@ -54,7 +54,7 @@ def parse_config
   }
 end
 
-PageSetup = Struct.new(:paper, :scale, :page_margin, :os_north, :grid_lines) do
+PageSetup = Struct.new(:paper, :scale, :page_margin, :grid_north, :grid_lines) do
   def initialize(*)
     super
     @axis = Dimensions[0.75, 0.5]
@@ -136,18 +136,18 @@ class NilClass
 end
 
 class TileServer
-  def initialize(id:, folder:, title: nil, grid_lines: false, os_north: false, zoom: nil, zooms: nil, scale: 0)
+  def initialize(id:, folder:, title: nil, grid_lines: false, grid_north: false, zoom: nil, zooms: nil, scale: 0)
     @id = id
     @folder = folder
     @grid_lines = grid_lines
-    @os_north = os_north
+    @grid_north = grid_north
     @scale = scale
     @title = title || id
     @zooms = zooms || (zoom.nil? ? 8..16 : [zoom])
     @zoom = closest_zoom(zoom || 14)
   end
 
-  attr_reader :id, :folder, :grid_lines, :os_north, :title, :zoom, :zooms, :scale
+  attr_reader :id, :folder, :grid_lines, :grid_north, :title, :zoom, :zooms, :scale
 
   def proxy_to_tile(tile)
     "/tile/#{id}/#{tile}"
@@ -217,7 +217,7 @@ class QuadkeyTileServer < TileServer
   attr_reader :mime
 
   def new_with_zoom(zoom)
-    QuadkeyTileServer.new(url: @url, id: id, folder: @folder, zoom: zoom, zooms: @zooms, grid_lines: grid_lines, os_north: os_north)
+    QuadkeyTileServer.new(url: @url, id: id, folder: @folder, zoom: zoom, zooms: @zooms, grid_lines: grid_lines, grid_north: grid_north)
   end
 
   def path_to_tile(quadkey)
@@ -273,7 +273,7 @@ end
 
 class StreetMapTileServer < TileServer
   def initialize(url:, lookup_url:, tile_size:, **rest)
-    super(grid_lines: false, os_north: false, **rest)
+    super(grid_lines: false, grid_north: false, **rest)
     @url = url
     @lookup_url = lookup_url
     @mime = 'image/gif'
@@ -349,7 +349,7 @@ class ZXYTileServer < TileServer
   attr_reader :mime
 
   def new_with_zoom(zoom)
-    ZXYTileServer.new(url: @url, id: id, folder: @folder, zoom: zoom, zooms: @zooms, grid_lines: grid_lines, os_north: os_north)
+    ZXYTileServer.new(url: @url, id: id, folder: @folder, zoom: zoom, zooms: @zooms, grid_lines: grid_lines, grid_north: grid_north)
   end
 
   def split(zxy)
@@ -534,7 +534,7 @@ def web_response_single(center, tile_server, page_setup, minimap = '')
                     margin-bottom: #{-page_setup.scale * scale_factor * (1 - pos_in_cell.y)}cm;
                     margin-left: #{-page_setup.scale * scale_factor * pos_in_cell.x}cm;
                     margin-right: #{-page_setup.scale * scale_factor * (1 - pos_in_cell.x)}cm;
-                    #{page_setup.os_north ? "transform: rotate(#{true_north}rad);" : ''}
+                    #{page_setup.grid_north ? "transform: rotate(#{true_north}rad);" : ''}
                     transform-origin:
                       calc(50% + #{page_setup.scale * pos_in_cell.x}cm / 2 - #{page_setup.scale * (1 - pos_in_cell.x)}cm / 2)
                       calc(50% + #{page_setup.scale * pos_in_cell.y}cm / 2 - #{page_setup.scale * (1 - pos_in_cell.y)}cm / 2);"
@@ -691,7 +691,7 @@ def controls(chosen_tile_server, page_setup, raw_req)
                        pattern: '([A-Z]{2}\s*(\d{2}\s*\d{2}|\d{3}\s*\d{3}|\d{4}\s*\d{4}|\d{5}\s*\d{5})(\n|$))+')
         end
         doc.div(class: 'flex-together') do
-          [[:os_north, 'Use grid north'], [:grid_lines, 'Overlay OS grid lines']].each do |(name, desc)|
+          [[:grid_north, 'Use grid north'], [:grid_lines, 'Overlay grid lines']].each do |(name, desc)|
             doc.label do
               doc.span(desc)
               doc.select(name: name) do
@@ -826,10 +826,10 @@ else
 
       coordinate_system = OSGrid.new
 
-      os_north = parse_boolean(req.query['os_north'], tile_server.os_north)
+      grid_north = parse_boolean(req.query['grid_north'], tile_server.grid_north)
       grid_lines = parse_boolean(req.query['grid_lines'], tile_server.grid_lines)
 
-      page_setup = PageSetup.new(paper, scale, margin, os_north, grid_lines)
+      page_setup = PageSetup.new(paper, scale, margin, grid_north, grid_lines)
 
       raw_req = req.query.transform_keys(&:to_sym)
       if req.query['fit']
