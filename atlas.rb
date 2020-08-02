@@ -686,11 +686,12 @@ def controls(chosen_tile_server, page_setup, raw_req)
             end
           end
         end
-        doc.div do
-          doc.textarea(position_input.gsub(',', "\n"),
-                       rows: 3, cols: 16,
-                       pattern: '([A-Z]{2}\s*(\d{2}\s*\d{2}|\d{3}\s*\d{3}|\d{4}\s*\d{4}|\d{5}\s*\d{5})(\n|$))+')
-        end
+        # TODO: replace the location pickers with this
+        # doc.div do
+        #   doc.textarea(position_input.gsub(',', "\n"),
+        #                rows: 3, cols: 16,
+        #                pattern: '([A-Z]{2}\s*(\d{2}\s*\d{2}|\d{3}\s*\d{3}|\d{4}\s*\d{4}|\d{5}\s*\d{5})(\n|$))+')
+        # end
         doc.div(class: 'flex-together') do
           [[:grid_north, 'Use grid north'], [:grid_lines, 'Overlay grid lines']].each do |(name, desc)|
             doc.label do
