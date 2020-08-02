@@ -398,7 +398,7 @@ end
 
 def terminal_response(center, tile_server)
   Dir.chdir(File.dirname(__FILE__))
-  center_tile = tile_server.from_os(*OSRef.parse_ref(center))
+  center_tile = tile_server.from_ll(OSGrid.new.to_ll(center))
   (-$h..$h).each do |y|
     line = (-$w..$w).map do |x|
       tile_server.move(center_tile, x, y)
@@ -463,7 +463,7 @@ end
 def corner_label(center, dx, dy, page_setup)
   # TODO: where the coordinate system comes from
   corner = center.move(* page_setup.scaled_map * [dx, dy] * 1000 / 2)
-  OSGrid.new.from_ll(corner)
+  OSGrid.new.from_ll(corner)[0...2]
 end
 
 def web_response_single(center, tile_server, page_setup, minimap = '')
@@ -519,10 +519,10 @@ def web_response_single(center, tile_server, page_setup, minimap = '')
             height: #{page_setup.scale * scale_factor}cm;
           }
         </style>
-        <div class="grid-letters top left">#{corner_label(center, -1, 1, page_setup)[0...2]}</div>
-        <div class="grid-letters bottom left">#{corner_label(center, -1, -1, page_setup)[0...2]}</div>
-        <div class="grid-letters top right">#{corner_label(center, 1, 1, page_setup)[0...2]}</div>
-        <div class="grid-letters bottom right">#{corner_label(center, 1, -1, page_setup)[0...2]}</div>
+        <div class="grid-letters top left">#{corner_label(center, -1, 1, page_setup)}</div>
+        <div class="grid-letters bottom left">#{corner_label(center, -1, -1, page_setup)}</div>
+        <div class="grid-letters top right">#{corner_label(center, 1, 1, page_setup)}</div>
+        <div class="grid-letters bottom right">#{corner_label(center, 1, -1, page_setup)}</div>
         <div class="border vertical pre"></div>
         <div class="border vertical post"></div>
         <div class="border horizontal pre"></div>
@@ -540,6 +540,7 @@ def web_response_single(center, tile_server, page_setup, minimap = '')
                       calc(50% + #{page_setup.scale * pos_in_cell.y}cm / 2 - #{page_setup.scale * (1 - pos_in_cell.y)}cm / 2);"
           >
   )
+  # TODO: check if extra is needed if we are very diagonal, e.g. at NV1070880909
   tile_grid = (page_setup.scaled_map / 2.0 / scale_factor).ceil
   (-tile_grid.height..tile_grid.height).each do |y|
     res << '<tr>'
