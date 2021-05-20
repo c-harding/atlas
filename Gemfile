@@ -14,7 +14,7 @@ gem 'quadkey', '~> 0.3.0'
 gem 'webrick', '~> 1.6'
 gem 'fileutils', '~> 1.4'
 gem 'down', '~> 5.1'
-gem 'nokogiri', '~> 1.10'
+gem 'nokogiri', '~> 1.11'
 
 gem 'concurrent-ruby', '~> 1.1'
 
