@@ -49,12 +49,18 @@ def parse_config
   {
     port: ENV['ATLAS_PORT'] || 5000,
     rc_file: ENV['ATLAS_RC'] || 'atlasrc.yaml',
-    address: ENV['ATLAS_ADDRESS'] || '127.0.0.1',
+    address: ENV['ATLAS_ADDRESS'] || '0.0.0.0',
     offline: !ENV['ATLAS_OFFLINE'].empty?
   }
 end
 
-PageSetup = Struct.new(:paper, :scale, :page_margin, :grid_north, :grid_lines) do
+PageSetup = Struct.new(
+  :paper, # cm x cm
+  :scale, # cm/km
+  :page_margin, # cm
+  :grid_north, # bool
+  :grid_lines, # bool
+) do
   def initialize(*)
     super
     @axis = Dimensions[0.75, 0.5]
@@ -62,23 +68,23 @@ PageSetup = Struct.new(:paper, :scale, :page_margin, :grid_north, :grid_lines) d
   end
   attr_reader :axis
 
-  def inner
+  def inner # cm x cm
     paper - page_margin * 2
   end
 
-  def map
+  def map # cm x cm
     inner - axis * 2
   end
 
-  def safe_map
+  def safe_map # cm x cm
     map - @overlap
   end
 
-  def scaled_map
+  def scaled_map # km x km
     map / scale
   end
 
-  def scaled_safe_map
+  def scaled_safe_map # km x km
     safe_map / scale
   end
 end
@@ -136,18 +142,20 @@ class NilClass
 end
 
 class TileServer
-  def initialize(id:, folder:, title: nil, grid_lines: false, grid_north: false, zoom: nil, zooms: nil, scale: 0)
+  def initialize(id:, folder:, title: nil, grid_lines: false, grid_north: false, zoom: nil, zooms: nil, scale: 0, hidden: false, cache_size: 0)
     @id = id
     @folder = folder
     @grid_lines = grid_lines
     @grid_north = grid_north
     @scale = scale
+    @hidden = hidden
+    @cache_size = cache_size
     @title = title || id
     @zooms = zooms || (zoom.nil? ? 8..16 : [zoom])
     @zoom = closest_zoom(zoom || 14)
   end
 
-  attr_reader :id, :folder, :grid_lines, :grid_north, :title, :zoom, :zooms, :scale
+  attr_reader :id, :folder, :grid_lines, :grid_north, :title, :zoom, :zooms, :scale, :hidden, :cache_size
 
   def proxy_to_tile(tile)
     "/tile/#{id}/#{tile}"
@@ -217,7 +225,7 @@ class QuadkeyTileServer < TileServer
   attr_reader :mime
 
   def new_with_zoom(zoom)
-    QuadkeyTileServer.new(url: @url, id: id, folder: @folder, zoom: zoom, zooms: @zooms, grid_lines: grid_lines, grid_north: grid_north)
+    QuadkeyTileServer.new(url: @url, id: id, folder: @folder, hidden: @hidden, cache_size: @cache_size, zoom: zoom, zooms: @zooms, grid_lines: grid_lines, grid_north: grid_north)
   end
 
   def path_to_tile(quadkey)
@@ -349,7 +357,7 @@ class ZXYTileServer < TileServer
   attr_reader :mime
 
   def new_with_zoom(zoom)
-    ZXYTileServer.new(url: @url, id: id, folder: @folder, zoom: zoom, zooms: @zooms, grid_lines: grid_lines, grid_north: grid_north)
+    ZXYTileServer.new(url: @url, id: id, folder: @folder, hidden: @hidden, cache_size: @cache_size, zoom: zoom, zooms: @zooms, grid_lines: grid_lines, grid_north: grid_north)
   end
 
   def split(zxy)
@@ -417,9 +425,10 @@ def neighbours(center, w, h)
 end
 
 def calculate_centers(points, padding, page_setup)
-  easting_limits = points.map { |ref| OSRef.parse_ref(ref)[0] }.minmax
-  northing_limits = points.map { |ref| OSRef.parse_ref(ref)[1] }.minmax
-  mid = OSRef.to_ref(easting_limits.reduce(:+) / 2.0, northing_limits.reduce(:+) / 2.0)
+  refs = points.map { |ref| OSRef.parse_ref(ref) }
+  easting_limits = refs.map { |ref| ref[0] }.minmax
+  northing_limits = refs.map { |ref| ref[1] }.minmax
+  mid = Pair[easting_limits.reduce(:+) / 2.0, northing_limits.reduce(:+) / 2.0]
   range = Pair[
     easting_limits[1] - easting_limits[0], # (m)
     northing_limits[1] - northing_limits[0], # (m)
@@ -427,11 +436,11 @@ def calculate_centers(points, padding, page_setup)
 
   counts = (range / page_setup.scaled_safe_map).floor
 
-  min = offset_grid_ref(mid, * -page_setup.scaled_safe_map * counts / 2)
+  min = mid - (page_setup.scaled_safe_map * 1000 * counts / 2) # m
 
   [counts.each_yx.map do |y, x|
-    offset_grid_ref(min, * page_setup.scaled_safe_map * [x, y])
-  end.join(','), *(counts + 1)]
+    OSRef.to_ref(* min + page_setup.scaled_safe_map * [x, y] * 1000)
+  end, *(counts + 1)]
 end
 
 def web_head(page_setup)
@@ -584,7 +593,7 @@ def web_response_single(center, tile_server, page_setup, minimap = '')
   res.string
 end
 
-def minimap(page_setup, centers, index, xcount, ycount)
+def minimap(page_setup, centers, index, coordinate_system, xcount, ycount)
   return '' unless xcount * ycount > 1
 
   minimap = StringIO.new
@@ -599,7 +608,7 @@ def minimap(page_setup, centers, index, xcount, ycount)
       i = y * xcount + x
       minimap << '<td '
       minimap << 'class="this" ' if index == i
-      minimap << "data-center='#{centers[i]}' "
+      minimap << "data-center='#{coordinate_system.from_ll(centers[i])}' "
       minimap << '>'
       minimap << '</td>'
     end
@@ -627,8 +636,10 @@ def controls(chosen_tile_server, page_setup, raw_req)
         doc.div(class: 'flex-together') do
           doc.select(name: :style, autocomplete: :off) do
             $tile_servers.values.each do |tile_server|
-              option[tile_server.title, tile_server.id, chosen_tile_server.id,
-                     'data-zooms': tile_server.zooms.to_a, 'data-scale': tile_server.scale]
+              if !tile_server.hidden || tile_server.id == chosen_tile_server.id
+                option[tile_server.title, tile_server.id, chosen_tile_server.id,
+                      'data-zooms': tile_server.zooms.to_a, 'data-scale': tile_server.scale]
+              end
             end
           end
           current_zoom = chosen_tile_server.zoom
@@ -726,7 +737,7 @@ def controls(chosen_tile_server, page_setup, raw_req)
   end.to_html
 end
 
-def web_response(centers, partial, tile_server, page_setup, raw_req, xcount = 0, ycount = 0)
+def web_response(centers, partial, tile_server, page_setup, raw_req, coordinate_system, xcount = 0, ycount = 0)
   res = StringIO.new
 
   unless partial
@@ -736,7 +747,7 @@ def web_response(centers, partial, tile_server, page_setup, raw_req, xcount = 0,
     res << controls(tile_server, page_setup, raw_req)
   end
   centers.each_with_index do |center, i|
-    res << web_response_single(center, tile_server, page_setup, minimap(page_setup, centers, i, xcount, ycount))
+    res << web_response_single(center, tile_server, page_setup, minimap(page_setup, centers, i, coordinate_system, xcount, ycount))
   end
   res << '</body></html>' unless partial
   res.string
@@ -775,6 +786,25 @@ $tile_servers = hash_by(
   end
 )
 
+# Run a cleanup job every 5 minutes
+Thread.new do
+  loop do
+    $tile_servers.each_value do |tile_server|
+      Dir.chdir(tile_server.folder) do
+        remaining_space = tile_server.cache_size
+        Dir['*'].sort_by { |f| File.mtime(f) }.reverse_each do |f|
+          remaining_space -= File.size(f) unless remaining_space < 0
+          if remaining_space < 0
+            puts "Cleaning up #{tile_server.folder}/#{f}"
+            File.delete(f)
+          end
+        end
+      end
+    end
+  end 
+  sleep(5*60)
+end
+
 if $stdout.isatty && ARGV[0]
   terminal_response(ARGV.join(' '), $tile_servers.default)
 else
@@ -811,6 +841,7 @@ else
         res.header['Content-Type'] = tile_server.mime
         res.header['Cache-Control'] = 'public'
         res.header['Expires'] = 'never'
+        FileUtils.touch cache_path
         res.body = File.new(cache_path, 'r')
       end
     when %r{^/(atlas\.js|atlas\.css)$}
@@ -835,8 +866,9 @@ else
 
       raw_req = req.query.transform_keys(&:to_sym)
       if req.query['fit']
-        fit_points = req.query['fit'].split(',').map(&coordinate_system.method(:to_ll))
-        centers, xcount, ycount = calculate_centers(fit_points, padding, page_setup)
+        fit_points = req.query['fit'].split(',')
+        centerRefs, xcount, ycount = calculate_centers(fit_points, padding, page_setup)
+        centers = centerRefs.map(&coordinate_system.method(:to_ll))
       elsif req.query['center']
         centers = req.query['center'].split(',').map(&coordinate_system.method(:to_ll))
         xcount = 0
@@ -846,7 +878,7 @@ else
         centers = []
       end
       res.header['Content-Type'] = 'text/html; charset=utf-8'
-      res.body = web_response(centers, !!partial, tile_server, page_setup, raw_req, xcount, ycount)
+      res.body = web_response(centers, !!partial, tile_server, page_setup, raw_req, coordinate_system, xcount, ycount)
     else
       res.status = 400
       res.body = 'Bad URL'

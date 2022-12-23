@@ -31,7 +31,7 @@ class OSRef
 
     # Simplify trailing zeroes
     trailing_zeros = (0...GRID_SIZE_LOG10 - 1).reverse_each.find do |n|
-      easting % (10**n) === 0 && northing % (10**n) === 0
+      easting.floor % (10**n) === 0 && northing.floor % (10**n) === 0
     end
     precision = 5 - trailing_zeros
     meters = format('%0*d', precision, easting % GRID_SIZE / (10**trailing_zeros)) + format('%0*d', precision, northing % GRID_SIZE / (10**trailing_zeros))
@@ -42,6 +42,7 @@ class OSRef
   def self.parse_ref(code)
     match = /
     ^
+      \s* # space
       (?<myriad>[a-z]{2}) # letters
       \s* # space
       (
@@ -49,6 +50,7 @@ class OSRef
       |
         (?<northing>\d{,5})\s+(?<easting>\d{,5}) # space-separated digits
       )
+      \s* # space
       $
     /ix.match(code)
     raise Error, "Invalid grid reference #{code.inspect}" unless match

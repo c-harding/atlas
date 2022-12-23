@@ -78,7 +78,7 @@ class Pair
   end
 
   def each_yx(exclusive: false, &block)
-    product(Range.new(0, y, exclusive), Range.new(0, x, exclusive), &block)
+    product(Range.new(0, y, exclusive).reverse_each, Range.new(0, x, exclusive), &block)
   end
 
   def as_linear_combination(horizontal, vertical)

@@ -1,21 +1,27 @@
 - type: quadkey
   url: "https://t.ssl.ak.dynamic.tiles.virtualearth.net/comp/ch/%s?mkt=en-GB&it=G,BX,RL&shading=hill&n=z&og=967&c4w=1&cstl=vb&src=h"
   id: 'bing'
-  folder: 'bing'
+  folder: 'cache/bing'
   title: "Bing Maps"
   grid_lines: true
   grid_north: true
+  hidden: false
+  cache_size: 10_000_000
 - type: zxy
   url: "https://{a|b|c}.tile.opentopomap.org/{z}/{x}/{y}.png"
   id: 'topo'
-  folder: 'topo'
+  folder: 'cache/topo'
   title: 'OpenTopoMap'
   grid_lines: true
   grid_north: false
+  hidden: false
+  cache_size: 10_000_000
 - type: zxy
   url: "http://{a|b}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png"
   id: 'fr'
-  folder: 'fr'
+  folder: 'cache/fr'
   title: 'OSM.fr'
   grid_lines: true
   grid_north: true
+  hidden: false
+  cache_size: 10_000_000
