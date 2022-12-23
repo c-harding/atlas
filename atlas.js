@@ -403,11 +403,29 @@ window.addEventListener("DOMContentLoaded", () => {
     document.body,
     "click",
     ".minimap td",
-    function (e) {
+    function () {
       const target = this.dataset.center;
       document.querySelector(`.page[data-center="${target}"]`).scrollIntoView();
-      console.log(target);
     }
+  );
+
+  [
+    [".border.vertical.post", "south"],
+    [".border.vertical.pre", "north"],
+    [".border.horizontal.pre", "west"],
+    [".border.horizontal.post", "east"],
+  ].forEach(([selector, direction]) =>
+    addDescendantEventListener(
+      document.body,
+      "dblclick",
+      selector,
+      function () {
+        const target = this.closest(".page").dataset[direction];
+        const map = document.querySelector(`.page[data-center="${target}"]`);
+        if (map) map.scrollIntoView();
+        else addMap(target);
+      }
+    )
   );
 });
 
@@ -426,4 +444,5 @@ const addMap = async (direction) => {
   const html = await res.text();
   document.body.insertAdjacentHTML("beforeend", html);
   addAllTicks();
+  document.querySelector(".page:last-child").scrollIntoView();
 };
