@@ -140,9 +140,9 @@ const addDimensionTicks = (
       0 <= intersect && intersect <= axisLength;
       intersect -= tickSep, coordinate -= skip
     ) {
-      const withinLimit = 6 <= intersect && intersect <= axisLength - 20;
+      const withinLimit = 6 <= intersect && intersect <= axisLength - 13;
       const nextWithinLimit =
-        6 <= intersect - tickSep && intersect - tickSep <= axisLength - 20;
+        6 <= intersect - tickSep && intersect - tickSep <= axisLength - 13;
       addAxisTick(
         element,
         coordinate,
@@ -157,9 +157,9 @@ const addDimensionTicks = (
       0 <= intersect && intersect <= axisLength;
       intersect += tickSep, coordinate += skip
     ) {
-      const withinLimit = 6 <= intersect && intersect <= axisLength - 20;
+      const withinLimit = 6 <= intersect && intersect <= axisLength - 13;
       const nextWithinLimit =
-        6 <= intersect + tickSep && intersect + tickSep <= axisLength - 20;
+        6 <= intersect + tickSep && intersect + tickSep <= axisLength - 13;
       addAxisTick(
         element,
         coordinate,
