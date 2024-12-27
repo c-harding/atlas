@@ -28,5 +28,5 @@ esac
   " "$PORT_ASSIGNMENT" "${DEPLOY_DIR:?missing, this must be provided to specify where on the server to deploy to}" "$RAW_DOMAIN" "$SERVER_PORT")"
 
   rsync --exclude=".ec2-deploy" -re"ssh $DEPLOY_FLAG" "${SOURCE_DIR:-.}" "$DEPLOY_TARGET":"$DEPLOY_DIR" &&
-  ssh "$DEPLOY_FLAG" "$DEPLOY_TARGET" "$DEPLOY_COMMAND"
+  ssh $DEPLOY_FLAG "$DEPLOY_TARGET" "$DEPLOY_COMMAND"
 )
