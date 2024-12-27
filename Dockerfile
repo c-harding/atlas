@@ -1,4 +1,6 @@
-FROM ruby:3.1.3
+FROM ruby:3.1.3-alpine
+
+RUN apk add make gcc musl-dev patch
 
 RUN bundle config --global frozen 1
 
