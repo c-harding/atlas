@@ -113,11 +113,11 @@ const addDimensionTicks = (
   coordinateLabel,
   axisSize,
   page,
-  skip,
+  skipSize,
   getIntersect
 ) => {
   const baseCoordinate =
-    Math.floor(page.dataset[coordinateLabel] / 1000 / skip) * skip;
+    Math.floor(page.dataset[coordinateLabel] / 1000 / skipSize) * skipSize;
 
   let minCoord = baseCoordinate;
   let maxCoord = baseCoordinate;
@@ -128,46 +128,35 @@ const addDimensionTicks = (
     const baseTickIntersect = getIntersect(bounds, baseLine);
     const nextTickIntersect = getIntersect(bounds, nextLine);
     const axisLength = bounds[axisSize];
-    const tickSep = nextTickIntersect - baseTickIntersect;
+    const tickSepSize = nextTickIntersect - baseTickIntersect;
 
-    if (tickSep == 0) {
+    if (tickSepSize == 0) {
       addAxisTick(element, baseCoordinate, offsetProperty, baseTickIntersect);
       continue;
     }
 
-    for (
-      let intersect = baseTickIntersect, coordinate = baseCoordinate;
-      0 <= intersect && intersect <= axisLength;
-      intersect -= tickSep, coordinate -= skip
-    ) {
-      const withinLimit = 6 <= intersect && intersect <= axisLength - 13;
-      const nextWithinLimit =
-        6 <= intersect - tickSep && intersect - tickSep <= axisLength - 13;
-      addAxisTick(
-        element,
-        coordinate,
-        offsetProperty,
-        intersect,
-        withinLimit && !nextWithinLimit
-      );
-      if (coordinate < minCoord) minCoord = coordinate;
-    }
-    for (
-      let intersect = nextTickIntersect, coordinate = baseCoordinate + skip;
-      0 <= intersect && intersect <= axisLength;
-      intersect += tickSep, coordinate += skip
-    ) {
-      const withinLimit = 6 <= intersect && intersect <= axisLength - 13;
-      const nextWithinLimit =
-        6 <= intersect + tickSep && intersect + tickSep <= axisLength - 13;
-      addAxisTick(
-        element,
-        coordinate,
-        offsetProperty,
-        intersect,
-        withinLimit && !nextWithinLimit
-      );
-      if (coordinate > maxCoord) maxCoord = coordinate;
+    for (const [tickSep, skip] of [
+      [-tickSepSize, -skipSize],
+      [tickSepSize, skipSize],
+    ]) {
+      for (
+        let intersect = baseTickIntersect, coordinate = baseCoordinate;
+        0 <= intersect && intersect <= axisLength;
+        intersect += tickSep, coordinate += skip
+      ) {
+        const withinLimit = 12 <= intersect && intersect <= axisLength - 19;
+        const nextWithinLimit =
+          12 <= intersect + tickSep && intersect + tickSep <= axisLength - 19;
+        addAxisTick(
+          element,
+          coordinate,
+          offsetProperty,
+          intersect,
+          withinLimit && !nextWithinLimit
+        );
+        if (coordinate < minCoord) minCoord = coordinate;
+        if (coordinate > maxCoord) maxCoord = coordinate;
+      }
     }
   }
   return [minCoord, maxCoord];
