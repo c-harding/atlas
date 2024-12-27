@@ -348,6 +348,7 @@ end
 
 class ZXYTileServer < TileServer
   def initialize(url:, **rest)
+    rest[:zooms] ||= url.keys if url.is_a? Hash
     super(**rest)
     @url = url
     @mime = 'image/jpeg'
@@ -357,7 +358,7 @@ class ZXYTileServer < TileServer
   attr_reader :mime
 
   def new_with_zoom(zoom)
-    ZXYTileServer.new(url: @url, id: id, folder: @folder, hidden: @hidden, cache_size: @cache_size, zoom: zoom, zooms: @zooms, grid_lines: grid_lines, grid_north: grid_north)
+    self.class.new(url: @url, id: id, folder: @folder, hidden: @hidden, cache_size: @cache_size, zoom: zoom, zooms: @zooms, grid_lines: grid_lines, grid_north: grid_north)
   end
 
   def split(zxy)
@@ -372,9 +373,17 @@ class ZXYTileServer < TileServer
     "#{zxy.gsub('/', '-')}.#{@extension}"
   end
 
+  def url(z=0)
+    if @url.is_a? Hash
+      @url[z]
+    else
+      @url
+    end
+  end
+
   def url_to_tile(zxy)
     z, x, y = split(zxy)
-    @url
+    url(z)
       .gsub(/\{((?:\w+\|)+\w+)\}/) { Regexp.last_match(1).split('|').sample }
       .gsub(/\{(\w)\}/) { { 'z' => z, 'x' => x, 'y' => y }[Regexp.last_match(1)] }
   end
@@ -401,6 +410,15 @@ class ZXYTileServer < TileServer
     lat_rad = Math.atan(Math.sinh(Math::PI * (1 - 2 * y / n)))
     lat = 180.0 * (lat_rad / Math::PI)
     LongLat[long, lat]
+  end
+end
+
+class TmsTileServer < ZXYTileServer
+  def url_to_tile(zxy)
+    z, x, y = split(zxy)
+    url(z)
+      .gsub(/\{((?:\w+\|)+\w+)\}/) { Regexp.last_match(1).split('|').sample }
+      .gsub(/\{(\w)\}/) { { 'z' => z, 'x' => x, 'y' => ((2**z).to_i - 1 - y) }[Regexp.last_match(1)] }
   end
 end
 
@@ -690,10 +708,10 @@ def controls(chosen_tile_server, page_setup, raw_req)
               input[:input_type, input_type,
                     type: :radio, autocomplete: :off,
                     **({ checked: true } if input_type == selected_input_type)]
-              doc.span "#{input_type.to_s.capitalize} "
+              doc.span("#{input_type.to_s.capitalize} ", title: "Comma-separated")
 
               input[input_type, (position_input if input_type == selected_input_type)]
-              doc.input(**(input_type == selected_input_type ? { value: position_input, required: true } : { tabindex: -1 }))
+              doc.input(placeholder: 'OS grid reference(s)', **(input_type == selected_input_type ? { value: position_input, required: true } : { tabindex: -1 }))
             end
           end
         end
@@ -774,6 +792,7 @@ $tile_servers = hash_by(
     server.transform_keys!(&:to_sym)
     server_type = {
       'zxy' => ZXYTileServer,
+      'tms' => TmsTileServer,
       'streetmap' => StreetMapTileServer,
       'quadkey' => QuadkeyTileServer
     }[server[:type]]
@@ -790,6 +809,7 @@ $tile_servers = hash_by(
 Thread.new do
   loop do
     $tile_servers.each_value do |tile_server|
+      next unless Dir.exist? tile_server.folder
       Dir.chdir(tile_server.folder) do
         remaining_space = tile_server.cache_size
         Dir['*'].sort_by { |f| File.mtime(f) }.reverse_each do |f|
@@ -801,8 +821,8 @@ Thread.new do
         end
       end
     end
+    sleep(5*60)
   end 
-  sleep(5*60)
 end
 
 if $stdout.isatty && ARGV[0]
@@ -816,8 +836,8 @@ else
   server.mount_proc '/' do |req, res|
     case req.path
     when %r{^/tile/([-\w]+)/(.+)$}
-      id = Regexp.last_match(1)
-      tile = Regexp.last_match(2)
+      id = $1
+      tile = $2
       tile_server = $tile_servers[id]
       folder = File.join(File.dirname(__FILE__), tile_server.folder)
 
@@ -826,7 +846,6 @@ else
       catch :not_found do
         unless File.exist?(cache_path)
           throw :not_found if config[:offline]
-          # puts "Fetching #{tile}"
           puts "Fetching #{tile} from #{tile_server.url_to_tile(tile)}"
           begin
             tempfile = Down.download(tile_server.url_to_tile(tile), ssl_verify_mode: OpenSSL::SSL::VERIFY_NONE)
@@ -845,7 +864,7 @@ else
         res.body = File.new(cache_path, 'r')
       end
     when %r{^/(atlas\.js|atlas\.css)$}
-      file_name = Regexp.last_match(1)
+      file_name = $1
       res.header['Content-Type'] = MIME::Types.of(file_name).first
       res.body = File.new(file_name, 'r')
     when '/'
