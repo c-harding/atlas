@@ -90,6 +90,13 @@ PageSetup = Struct.new(
 end
 
 class CoordinateSystem
+  def from_ll(ll)
+    fail NotImplementedError, "parse a lat-long pair"
+  end
+
+  def to_ll(osref)
+    fail NotImplementedError, "Export a lat-long pair"
+  end
 end
 
 class OSGrid < CoordinateSystem
@@ -130,7 +137,7 @@ class OSGrid < CoordinateSystem
   end
 end
 
-# Allow splatting hashes
+# Allow splatting nil
 class NilClass
   def to_hash
     {}
@@ -782,7 +789,7 @@ end
 config = parse_config
 
 begin
-  rc = YAML.load_file(config[:rc_file])
+  rc = YAML.load_file(config[:rc_file], permitted_classes: [Symbol, Range])
 rescue Errno::ENOENT
   abort("Cannot find config file #{config[:rc_file].inspect}, have you tried copying the sample one?")
 end

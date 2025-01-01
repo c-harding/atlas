@@ -25,3 +25,28 @@
   grid_north: true
   hidden: false
   cache_size: 10_000_000
+- type: zxy
+  url: "https://intergeo35.bayernwolke.de/betty/c_g_amtkarte_alkisparzellar_by/{z}/{x}/{y}"
+  id: "bayern"
+  folder: cache/bayern
+  title: "Bayern"
+  grid_lines: false
+  grid_north: false
+  zooms: !ruby/range 3..15
+  cache_size: 10_000_000
+- type: zxy
+  url: "https://maps.bev.gv.at/tiles/karte/{z}/{x}/{y}.png"
+  id: "at"
+  folder: cache/at
+  title: "Österreich"
+  grid_lines: false
+  grid_north: false
+  cache_size: 10_000_000
+- type: zxy
+  url: "https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/{z}/{x}/{y}.jpeg"
+  id: "ch"
+  folder: cache/ch
+  title: "Swiss"
+  grid_lines: false
+  grid_north: false
+  cache_size: 10_000_000
