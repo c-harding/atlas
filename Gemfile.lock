@@ -63,7 +63,7 @@ GEM
     thor (1.3.1)
     tilt (2.4.0)
     unicode-display_width (1.7.0)
-    webrick (1.6.0)
+    webrick (1.8.2)
     yard (0.9.36)
 
 PLATFORMS
@@ -81,7 +81,7 @@ DEPENDENCIES
   quadkey (~> 0.3.0)
   rubocop (~> 0.88.0)
   solargraph (~> 0.39.11)
-  webrick (~> 1.6)
+  webrick (~> 1.8)
 
 BUNDLED WITH
    2.1.2
