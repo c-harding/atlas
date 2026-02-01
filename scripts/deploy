@@ -22,7 +22,7 @@ esac
 (
   RAW_DOMAIN="${DOMAIN/#*\/\//}"
   DEPLOY_COMMAND="$(printf "
-    %s docker-compose -f%q/docker-compose.yml up --build -d &&
+    %s docker compose -f%q/docker-compose.yml up --build -d &&
     docker system prune -f &&
     (command -v add-site > /dev/null && add-site %q %d; true)
   " "$PORT_ASSIGNMENT" "${DEPLOY_DIR:?missing, this must be provided to specify where on the server to deploy to}" "$RAW_DOMAIN" "$SERVER_PORT")"
